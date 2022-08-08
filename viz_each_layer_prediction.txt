@@ -1,0 +1,4 @@
+col3 = 32; 
+row3 = int(next_row_block_start[col3]);
+ _ = plt.plot(mod_echo [row3:row3+filt_y, col3:col3+filt_x]); 
+_ = plt.axvline(x=predict[col3])
