@@ -46,7 +46,7 @@ if gpus:
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 
-use_wandb = True
+use_wandb = False
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 
 if use_wandb:    
@@ -200,9 +200,9 @@ def read_mat_train(filepath):
         # Data Augmentation
         
         #if tf.random.uniform(())> 0.1:
-        aug_type = tf.random.uniform((1,1),minval=1, maxval=8,dtype=tf.int64).numpy()      
+        aug_type = tf.random.uniform((1,1),minval=1, maxval=10,dtype=tf.int64).numpy()      
  
-        # if aug_type == 1:
+        # if aug_type == 9:
         #     echo = tf.experimental.numpy.fliplr(echo)
         #     layer = tf.experimental.numpy.fliplr(layer)
         
@@ -233,8 +233,8 @@ def read_mat_train(filepath):
             echo = tf.experimental.numpy.flipud(echo)
             layer = tf.experimental.numpy.flipud(layer) 
         
-        layer = tf.expand_dims(layer, axis=-1)
-        #layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
+        # layer = tf.expand_dims(layer, axis=-1)
+        layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
         shape0 = echo.shape #mat_file['echo_tmp'].shape
         
         return echo,layer,np.asarray(shape0)
@@ -244,7 +244,7 @@ def read_mat_train(filepath):
     data0.set_shape([416,64,config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64,1])#,30    
+    data1.set_shape([416,64,30])#,30    
     return data0,data1
 # =============================================================================
 ## Function for test and validation dataset    
@@ -261,8 +261,8 @@ def read_mat(filepath):
         
         layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)      
 
-        layer = tf.expand_dims(layer, axis=-1)
-        #layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
+        # layer = tf.expand_dims(layer, axis=-1)
+        layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
         shape0 = echo.shape #mat_file['echo_tmp'].shape        
         return echo,layer,np.asarray(shape0)     
     
@@ -272,20 +272,20 @@ def read_mat(filepath):
     data0.set_shape([416,64,config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64,1]) #,30   
+    data1.set_shape([416,64,30]) #,30   
     return data0,data1
 
 train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
-train_ds = train_ds.map(read_mat_train,num_parallel_calls=8)
+train_ds = train_ds.map(read_mat,num_parallel_calls=8)
 train_ds = train_ds.batch(config['batch_size'],drop_remainder=True).prefetch(AUTO) #.shuffle(buffer_size = 100 * config['batch_size'])
 
 # No augmentation for testing and validation
 val_ds = tf.data.Dataset.list_files(val_path,shuffle=True)
-val_ds = val_ds.map(read_mat_train,num_parallel_calls=8)
+val_ds = val_ds.map(read_mat,num_parallel_calls=8)
 val_ds = val_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 test_ds = tf.data.Dataset.list_files(test_path,shuffle=True)
-test_ds = test_ds.map(read_mat_train,num_parallel_calls=8)
+test_ds = test_ds.map(read_mat,num_parallel_calls=8)
 test_ds = test_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 train_shape = [ ( tf.shape(item[0]).numpy(),tf.shape(item[1]).numpy() ) for item in train_ds.take(1) ]
@@ -302,6 +302,7 @@ config['num_patches'] = num_patches = train_shape[0][1] #64
 
 config['embed_dim_flipped'] = train_shape[0][1]
 config['num_patches_flipped'] = train_shape[0][2]
+config['dropout_rate'] = 0.1
 
 num_heads = 20
 dense_dim = 512
@@ -322,8 +323,8 @@ input_shape = (416, 64, config['img_channels'])
 
 
 def mlp(x, hidden_units, dropout_rate):
-    for units in hidden_units:
-        x = layers.Dense(units, activation=tf.nn.gelu)(x)
+    for (idx,units) in enumerate(hidden_units):
+        x = layers.Dense(units, activation=tf.nn.gelu if idx == 0 else None,)(x)
         x = layers.Dropout(dropout_rate)(x)
     return x
 
@@ -436,8 +437,9 @@ inputs = layers.Input(shape=input_shape)
 
 # Project inputs
 dense_proj = tf.keras.Sequential()
-for units in proj_head_units:
-    dense_proj.add(layers.Dense(units, activation='relu', use_bias=True) )
+for (idx,units) in enumerate(proj_head_units):
+    dense_proj.add(layers.Dense(units, activation=tf.nn.gelu if idx == 0 else None) )
+    dense_proj.add(layers.Dropout(config['dropout_rate']))
     
 
 # Encode patches
@@ -456,7 +458,7 @@ for _ in range(transformer_layers):
     x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
     # Create a multi-head attention layer.
     attention_output = layers.MultiHeadAttention(
-        num_heads=num_heads, key_dim=embed_dim, dropout=0.1
+        num_heads=num_heads, key_dim=embed_dim, dropout=config['dropout_rate']
     )(x1, x1)
     # Skip connection 1.
     x2 = layers.Add()([attention_output, encoded_patches])
@@ -466,25 +468,23 @@ for _ in range(transformer_layers):
     # Skip connection 2.
     encoded_patches = layers.Add()([x3, x2])
     
-    # # # MLP (Newly Added: Might delete)
-    # mlp_out = mlp(encoded_patches,mlp_head_units,dropout_rate = 0.1)    
+    # # MLP (Newly Added: Might delete)
+    # mlp_out = mlp(encoded_patches,mlp_head_units,dropout_rate = config['dropout_rate'])    
     # # Skip connection 2.
     # encoded_patches = layers.Add()([x3, mlp_out])
     # # # MLP (Newly Added: Might delete)
 
 # Project Transformer output     
 representation = dense_proj(encoded_patches)
-
-# Create a [batch_size, embed_dim] tensor.
 representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
 
 representation= tf.expand_dims(representation, axis=-1)  
 
 representation = layers.Conv2D(config['num_classes']*5, (7,5), activation=tf.nn.gelu, padding="same")(representation)
 representation = layers.Conv2D(config['num_classes']*5, 3, activation='relu', padding="same")(representation)
-representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
-layers.Dropout(0.3)(representation)
-output = layers.Conv2D(config['num_classes'], (1,1),  dtype = tf.float32, padding="same")(representation) #activity_regularizer='l2', activation="softmax"
+#representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
+layers.Dropout(config['dropout_rate'])(representation)
+output = layers.Conv2D(config['num_classes'], (1,1), padding="same", dtype = tf.float64, activation="softmax")(representation) # dtype = tf.float32,activity_regularizer='l2', activity_regularizer='l2', activation="softmax"
  
 
 # return Keras model.
@@ -506,10 +506,10 @@ callbacks = [
     ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.000005, verbose= 1),
     EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
     TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
-    WandbCallback()
+    #WandbCallback()
 ]
 
-loss = SparseCategoricalFocalLoss(gamma = 3, from_logits = True) #tf.keras.losses.CategoricalCrossentropy()
+loss = tf.keras.losses.CategoricalCrossentropy()  #tf.keras.losses.CategoricalCrossentropy(), SparseCategoricalFocalLoss(gamma = 3, from_logits = True), tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 model.compile(optimizer=opt,
           loss= loss, #tf.keras.losses.CategoricalCrossentropy(), #custom_loss, dice_coef_loss tf.keras.losses.CategoricalCrossentropy()
           metrics=['accuracy']) #,tf.keras.metrics.MeanIoU(num_classes, name="MeanIoU")
