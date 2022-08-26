@@ -55,13 +55,18 @@ tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 
 ## WandB config
-import wandb
-from wandb.keras import WandbCallback
+use_wandb = False
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 
-wandb.init( project="my-test-project", entity="ibksolar", name='AttnUNet'+time_stamp,config ={})
-config = wandb.config
-
+if use_wandb:    
+    ## WandB config
+    import wandb
+    from wandb.keras import WandbCallback    
+    
+    wandb.init( project="my-test-project", entity="ibksolar", name='EchoViT1'+time_stamp,config ={})
+    config = wandb.config
+else:
+    config ={}
 
 try:
     fname = ipynbname.name()
@@ -439,7 +444,7 @@ def Attention_ResUNet_PA(input_shape,num_classes= config['num_classes'] ,dropout
     att_16 = attention_block(conv_16, gating_16, 8*filter_num, name='att_16')
     # attention re-weight & concatenate
     up_16 = layers.UpSampling2D(size=(up_samp_size, up_samp_size), data_format="channels_last")(conv_8)
-    up_16 = layers.concatenate([up_16, att_16], axis=axis)
+    up_16 = layers.concatenate([up_16, att_16]) #, axis=axis
     up_conv_16 = double_conv_layer(up_16, filter_size_mtx[2], 8*filter_num, dropout_rate, batch_norm)
 
     # UpRes 7
@@ -449,8 +454,8 @@ def Attention_ResUNet_PA(input_shape,num_classes= config['num_classes'] ,dropout
     gating_32 = gating_signal(up_conv_16, 4*filter_num, batch_norm) #up_conv_16
     att_32 = attention_block(conv_32, gating_32, 4*filter_num, name='att_32')  #se_conv_32
     # attention re-weight & concatenate
-    up_32 = layers.UpSampling2D(size=(up_samp_size, up_samp_size), data_format="channels_last")(up_conv_16)
-    up_32 = layers.concatenate([up_32, att_32], axis=axis)
+    up_32 = layers.UpSampling2D(size=(up_samp_size, up_samp_size),)(up_conv_16) # data_format="channels_last"
+    up_32 = layers.concatenate([up_32, att_32], ) #axis=axis
     up_conv_32 = double_conv_layer(up_32, filter_size_mtx[2], 4*filter_num, dropout_rate, batch_norm)
 
     # UpRes 8
@@ -460,8 +465,8 @@ def Attention_ResUNet_PA(input_shape,num_classes= config['num_classes'] ,dropout
     gating_64 = gating_signal(up_conv_32, 2*filter_num, batch_norm)
     att_64 = attention_block(conv_64, gating_64, 2*filter_num, name='att_64') #se_conv_64
     # attention re-weight & concatenate
-    up_64 = layers.UpSampling2D(size=(up_samp_size, up_samp_size), data_format="channels_last")(up_conv_32)
-    up_64 = layers.concatenate([up_64, att_64], axis=axis)
+    up_64 = layers.UpSampling2D(size=(up_samp_size, up_samp_size), )(up_conv_32) #data_format="channels_last"
+    up_64 = layers.concatenate([up_64, att_64], ) #axis=axis
     up_conv_64 = double_conv_layer(up_64, filter_size_mtx[2], 2*filter_num, dropout_rate, batch_norm)
 
     # UpRes 9
@@ -471,12 +476,12 @@ def Attention_ResUNet_PA(input_shape,num_classes= config['num_classes'] ,dropout
     gating_128 = gating_signal(up_conv_64, filter_num, batch_norm)
     # attention re-weight & concatenate
     att_128 = attention_block(conv_128, gating_128, filter_num, name='att_128') #se_conv_128
-    up_128 = layers.UpSampling2D(size=(up_samp_size, up_samp_size), data_format="channels_last")(up_conv_64)
-    up_128 = layers.concatenate([up_128, att_128], axis=axis)
+    up_128 = layers.UpSampling2D(size=(up_samp_size, up_samp_size))(up_conv_64) # data_format="channels_last"
+    up_128 = layers.concatenate([up_128, att_128]) #, axis=axis
     up_conv_128 = double_conv_layer(up_128, filter_size, filter_num, dropout_rate, batch_norm)
     
     # up_conv_128 = tf.reduce_sum(up_conv_128,axis=-1)
-    up_conv_128 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(up_conv_128)
+    up_conv_128 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu',  padding='same')(up_conv_128) #kernel_initializer='he_normal',
     up_conv_128 = tf.keras.layers.Dropout(0.5)(up_conv_128)
     #outputs = tf.keras.layers.Conv2D(config['config['num_classes'] '] , (1, 1), activation='sigmoid')(up_conv_128) #sigmoid, softmax
     
@@ -508,9 +513,9 @@ logz= f"{config['base_path']}//AttUNet//{config['start_time']}_logs/"
 # Callbacks
 callbacks = [
     ModelCheckpoint(f"{config['base_path']}//AttUNet//AttUNet_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=5, min_lr=0.00001),
-    EarlyStopping(monitor="val_loss", patience=25, verbose=1),
-    WandbCallback()    
+    ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=10, min_lr=0.00001),
+    EarlyStopping(monitor="val_loss", patience=50, verbose=1),
+    #WandbCallback()    
 ]
 
 # Poly Rate scheduler
@@ -551,13 +556,15 @@ training_loss_fn = bce_jaccard_loss
 #model.compile( optimizer=opt1,loss="sparse_categorical_crossentropy" , metrics=["sparse_categorical_accuracy"],) #"sparse_categorical_crossentropy" , sparse_categorical_accuracy", tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.3)
 
 if config['num_classes']  > 1:
-    model.compile( optimizer=opt4,loss= tf.keras.losses.CategoricalCrossentropy() , metrics=['accuracy',sm.metrics.iou_score] ) # sm.metrics.iou_score,'categorical_crossentropy', sparse_categorical_accuracy", tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.3)
+    model.compile( optimizer=opt4,loss= tf.keras.losses.CategoricalCrossentropy() , metrics=[sm.metrics.iou_score,'accuracy'] ) # sm.metrics.iou_score,'categorical_crossentropy', sparse_categorical_accuracy", tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.3)
 else:
     model.compile( optimizer=opt4,loss= 'binary_crossentropy' , metrics=['accuracy']) #binary_crossentropy, 'binary_crossentropy',sm.metrics.iou_score,
 
 history = model.fit(train_ds, epochs= config['epochs'], validation_data= val_ds, callbacks = callbacks) # , callbacks = callbacks)   mcp_save, callbacks=[reduce_lr_loss]
 
 
+end_time = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
+print(f'Training end time:{end_time}')
 
 
 # model_save_path = f"{ config['base_path'] }/AttentionUNet_Sren/Best_model_{time_stamp}.h5"
