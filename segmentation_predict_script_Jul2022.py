@@ -21,6 +21,7 @@ import os
 import random
 from scipy.io import loadmat,savemat
 from scipy.ndimage import median_filter as sc_med_filt
+from scipy.signal import butter,filtfilt, medfilt
 
 from keras.metrics import MeanIoU
 from sklearn.metrics import roc_auc_score
@@ -76,14 +77,14 @@ finally:
     fname = 'blank'
 ##############################################################################
 ## Important Flags
-decimated_model = True
+decimated_model = False
 
 run_predictions = False 
 save_predictions = False # run_predictions needs to be "True" for save_predictions
 
 # Typically, only one of the 2 below can be "True" at a time
-binary_viz = False # Vizualize predictions for binary model
-segmentation_viz = True# Vizualize predictions for segmentation model
+binary_viz = True # Vizualize predictions for binary model
+segmentation_viz = False # Vizualize predictions for segmentation model
 ##==============================================================================##
 ## # Path to data
 ##==============================================================================##    
@@ -157,6 +158,33 @@ for segment in segments:
         return -dice_coef(y_true, y_pred)
     ##############################################################################
     
+    config['num_patches'] = 416
+    config['embed_dim'] = 64
+    
+    class PatchEncoder(layers.Layer):        
+        def __init__(self, num_patches = config['num_patches'], embed_dim = config['embed_dim'], **kwargs):
+            super(PatchEncoder, self).__init__(**kwargs)
+            self.num_patches = num_patches
+            self.projection = layers.Dense(units=embed_dim)
+            self.position_embedding = layers.Embedding(
+                input_dim=num_patches, output_dim=embed_dim
+            )
+    
+        def call(self, patch):
+            positions = tf.range(start=0, limit=self.num_patches, delta=1)
+            encoded = self.projection(patch) + self.position_embedding(positions)
+            return encoded
+    
+        # Override function to avoid error while saving model
+        def get_config(self):
+            config = super().get_config().copy()
+            config.update(
+                {               
+                    "num_patches": config['num_patches'],
+                    "embed_dim": config['embed_dim'],
+                }
+            )
+            return config
     
     
     ##==============================================================================##
@@ -165,23 +193,52 @@ for segment in segments:
     
     from itertools import groupby
     
-    def fix_final_prediction(a, a_final):
-        for col_idx in range(a_final.shape[1]):
-            repeat_tuple = [ (k,sum(1 for _ in groups)) for k,groups in groupby(a_final[:,col_idx]) ]
-            rep_locs = np.cumsum([ item[1] for item in repeat_tuple])
+def fix_final_prediction(a, a_final, closeness = 15):
+    """
+    inputs: a --> raw probabilities
+            a_final --> thresholded_probability
             
-            # Temporary hack
-            rep_locs[-1] = rep_locs[-1] - 1
-            
-            locs_to_fix = [ (elem[1],rep_locs[idx]) for idx,elem in enumerate(repeat_tuple) if elem[0]== 1 and elem[1]>1 ]
-            
-            for elem0 in locs_to_fix:
-                check_idx = list(range(elem0[1]-elem0[0],elem0[1]+1))
-                max_loc = check_idx[0] + np.argmax(a[elem0[1]-elem0[0]:elem0[1], col_idx])
-                check_idx.remove(max_loc)            
-                a_final[check_idx,col_idx] = 0
+    output: a_final --> Overwrites input to return binary mask  
+    """
+    for col_idx in range(a_final.shape[1]):
         
-        return a_final
+        # Find groups of 0s and 1s
+        repeat_tuple = [ (k,sum(1 for _ in groups)) for k,groups in groupby(a_final[:,col_idx]) ]
+        # Cumulate the returned index
+        rep_locs = np.cumsum([ item[1] for item in repeat_tuple])
+        
+        # Temporary hack
+        rep_locs[-1] = rep_locs[-1] - 1          
+
+        locs_to_fix = [ (elem[1],rep_locs[idx]) for idx,elem in enumerate(repeat_tuple) if elem[0]== 1 and elem[1]>1 ]
+        
+        for elem0 in locs_to_fix:
+            check_idx = list(range(elem0[1]-elem0[0],elem0[1]+1))
+            max_loc = check_idx[0] + np.argmax(a[elem0[1]-elem0[0]:elem0[1], col_idx])
+            check_idx.remove(max_loc)            
+            a_final[check_idx,col_idx] = 0
+        
+        ## Section to find ones whose index are close and remove those with lower probabilities
+        
+        # Find groups of 0s and 1s the second time after repeated 1s have been removed.
+        repeat_tuple = [ (k,sum(1 for _ in groups)) for k,groups in groupby(a_final[:,col_idx]) ]            
+        rep_locs = np.cumsum([ item[1] for item in repeat_tuple]) # Cumulate the returned index
+        
+        one_locs_idx = [(idx,rep_locs[idx]) for idx,iter in enumerate(repeat_tuple) if iter[0] ==1 ]
+        one_locs = [item[1] for item in one_locs_idx] # Just the locs of the 1s 
+        
+        if np.any( np.diff(one_locs, prepend = 0) < closeness ): # Check if any 1s has index less than 5 to the next 1                 
+            
+            close_locs_idx = np.where(np.diff(one_locs, prepend = 0) < closeness )[0]                
+            
+            for item in close_locs_idx:
+                # Compare the probs of the "1" before the close 
+                check1, check2 = one_locs[item-1]-1, one_locs[item]-1 # Indexing is off by one
+                min_chk = check1 if a[check1,col_idx] < a[check2,col_idx] else check2
+                a_final[min_chk, col_idx] = 0
+        
+    
+    return a_final
     
     ### Create Old vec_layer function
     def create_vec_layer_old(raster):
@@ -196,7 +253,7 @@ for segment in segments:
     
     
     
-    def create_vec_layer(raster,threshold=8):
+    def create_vec_layer(raster,threshold={'constant':5}):
         '''              
         Parameters
         ----------
@@ -218,11 +275,17 @@ for segment in segments:
         #TO DO: Check type of raster; should be numpy array
         
         diff_temp = np.argwhere(raster) #raster.nonzero()
-        Nt = raster.shape[-1]
+        Nx = raster.shape[-1]
         bin_rows,bin_cols = diff_temp[:,0], diff_temp[:,1]    
         bin_rows +=1 # Correct offset
         
-        threshold = np.round( threshold*np.exp(0.008*np.linspace(1,100,100)) )
+        if 'constant' in threshold.keys():
+            threshold = threshold['constant'] * np.ones(shape=(100,))
+        else:
+            threshold = np.round( list( threshold.values())[0] *np.exp(0.008*np.linspace(1,100,100)) )
+               
+        #threshold = np.round( threshold*np.exp(0.008*np.linspace(1,100,100)) )
+        #threshold = 7
     
         #brk_points = [ idx for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold ]   #np.diff(bin_rows)
         #brk_pt_chk = [ (idx,bin_rows[idx],value) for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold] 
@@ -230,23 +293,44 @@ for segment in segments:
         
         # Initialize
         brk_points = [ 0 ] 
-        vec_layer = np.zeros( shape=(1,Nt) ) # Total number of layers is not known ahead of time
+        vec_layer = np.zeros( shape=(1,Nx) ) # Total number of layers is not known ahead of time
         
-        brk_pt_start = 0;  brk_pt_stop = Nt;
+        # Initializations
+        brk_pt_start = 0;  brk_pt_stop = Nx;
+        brk_pt_start2,brk_pt_stop2 = None, None
+        
         count = 0
         
-        while brk_pt_start < len(bin_rows):
-            if ( np.diff(bin_rows[brk_pt_start:brk_pt_stop]) > int(threshold[count]) ).any():
-                tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop]) > int(threshold[count]) )[0]
+        while brk_pt_start < len(bin_rows) :
+            if ( np.diff(bin_rows[brk_pt_start:brk_pt_stop] ) > threshold[count] ).any():
+                tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop]) > threshold[count] )[0] #int(threshold[count])
                 if len(tmp_res)>1:
                     brk_pt_stop = (tmp_res[tmp_res>0][0] + brk_pt_start).item()
                 else:
                     brk_pt_stop = (tmp_res  + brk_pt_start ).item()
+            else:
+                if brk_pt_stop < len(bin_rows):                    
+                    brk_pt_stop2 = brk_pt_stop + Nx
+                    tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) > threshold[count] )[0] 
+                    
+                    if len(tmp_res) == 0:
+                        max_diff = np.max( np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) )
+                        tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0] 
+                        tmp_res = tmp_res[::-1]
+
+                    brk_pt_stop2 =  (tmp_res[tmp_res>0][0] + brk_pt_start).item() if len(tmp_res)>1 else  (tmp_res  + brk_pt_start ).item()
+                    
+                else:
+                    # Should be the last layer
+                    brk_pt_stop2 = len(bin_rows)                                 
+                
+                brk_pt_stop = brk_pt_stop2 - Nx # This might not be correct
+                brk_pt_start2 = brk_pt_stop + 1 if brk_pt_stop2 < len(bin_rows) else brk_pt_start
                     
                
-            vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nt)) ) )
-            used_cols = bin_cols[brk_pt_start:brk_pt_stop]
-            used_rows = bin_rows[brk_pt_start:brk_pt_stop ]
+            vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
+            used_cols = bin_cols[brk_pt_start:brk_pt_stop+1] # Added extra 1 because of zero indexing
+            used_rows = bin_rows[brk_pt_start:brk_pt_stop+1 ] # Added extra 1 because of zero indexing
             
             _,used_cols_unq = np.unique(used_cols,return_index=True)
             
@@ -254,11 +338,27 @@ for segment in segments:
             used_rows = used_rows[used_cols_unq]
              
             vec_layer[-1, used_cols ] = used_rows                                   
-                
-            brk_pt_start = brk_pt_stop + 1
-            brk_pt_stop = brk_pt_start + Nt
+            brk_points.append( (brk_pt_start,brk_pt_stop,brk_pt_stop-brk_pt_start, list(used_rows) ) )
             
-            brk_points.append( (brk_pt_start,brk_pt_stop) )  
+            if brk_pt_start2 and brk_pt_stop2:
+                vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
+                used_cols = bin_cols[brk_pt_start2:brk_pt_stop2 +1 ]
+                used_rows = bin_rows[brk_pt_start2:brk_pt_stop2 +1 ]                
+                _,used_cols_unq = np.unique(used_cols,return_index=True)
+                
+                used_cols = used_cols[used_cols_unq]
+                used_rows = used_rows[used_cols_unq]
+                 
+                vec_layer[-1, used_cols ] = used_rows                                   
+                brk_points.append( (brk_pt_start2,brk_pt_stop2,brk_pt_stop2-brk_pt_start2, list(used_rows) ) )
+                
+                brk_pt_start, brk_pt_stop = brk_pt_start2, brk_pt_stop2 # Set the new brk_points to the latest one                                               
+            
+            brk_pt_start = brk_pt_stop + 1
+            brk_pt_stop = brk_pt_start + Nx + 5 # Adding extra one to complete 64 and realizing Python indexing w/o last element
+            
+            brk_pt_stop2 = brk_pt_start2 = None           
+             
             count +=1
 
 
@@ -296,7 +396,7 @@ for segment in segments:
               
           res0 = res0.squeeze()
           # res0_final = np.argmax(res0,axis=2)
-          res0_final = np.where(res0>0.05,1,0)
+          res0_final = np.where(res0>0.03,1,0)
           
           # res0_final = sc_med_filt( sc_med_filt(res0_final.T,size=3).T, size= 3)
           
@@ -304,30 +404,36 @@ for segment in segments:
               res0_final1 = np.arange(1,417).reshape(416,1) * fix_final_prediction(res0,res0_final)
           else:
               res0_final1 = np.arange(1,416*4+1).reshape(416*4,1) * fix_final_prediction(res0,res0_final)
-              
-              
+          
+          b = np.ones((5,))/5; a = 1    
+          res0_final2 = np.ceil( filtfilt(b,a,res0_final1, axis =-1) ) 
           # How correct is create_vec_layer??
-          thresh = 1
+          thresh = {'constant': 15}
           z = create_vec_layer(res0_final1,thresh); 
+          
           z[z==0] = np.nan;
           
-          z_filtered =  sc_med_filt(z,size=3)
+          #b = (np.ones((7,1))/7).squeeze(); a = 1;          
+          #z_filtered =  filtfilt(b,a,z).astype('int32') #sc_med_filt(z,size=3)
           
-          f, axarr = plt.subplots(1,4,figsize=(20,20))
+          f, axarr = plt.subplots(1,5,figsize=(20,20))
         
           axarr[0].imshow(a01.squeeze(),cmap='gray_r')
           axarr[0].set_title( f'Echo {os.path.basename(model_pred_data[batch_idx+idx])}') #.set_text
           
-          axarr[1].imshow(res0_final1.astype(bool).astype(int), cmap='viridis' )
-          axarr[1].set_title('Prediction')        
+          axarr[1].imshow(res0_final.astype(bool).astype(int), cmap='viridis' )
+          axarr[1].set_title('Prediction before threshold') 
           
-          axarr[2].plot(z.T) # gt
-          axarr[2].invert_yaxis()
-          axarr[2].set_title( f'Vec_layer({thresh})') #.set_text
-          
-          axarr[3].imshow(a01.squeeze(),cmap='gray_r')          
+          axarr[2].imshow(res0_final1.astype(bool).astype(int), cmap='viridis' )
+          axarr[2].set_title('Prediction') 
+
           axarr[3].plot(z.T) # gt
-          axarr[3].set_title( 'Overlaid prediction') #.set_text
+          axarr[3].invert_yaxis()
+          axarr[3].set_title( f'Vec_layer({thresh})') #.set_text
+          
+          axarr[4].imshow(a01.squeeze(),cmap='gray_r')          
+          axarr[4].plot(z.T) # gt
+          axarr[4].set_title( 'Overlaid prediction') #.set_text
           #axarr[2].set_title( f'Ground truth {os.path.basename(model_pred_data[batch_idx])}') #.set_text
           
           
@@ -347,11 +453,11 @@ for segment in segments:
           #a01,a_gt0 = predict_data['echo_tmp'], predict_data['raster']
           a01 = predict_data['echo_tmp']
           
-          if model.input_shape[-1]  >1:
+          if model.input_shape[-1] == 3:
               a0 = np.stack((a01,)*3,axis=-1)
               res0 = model.predict ( np.expand_dims(a0,axis=0))
           else:
-              res0 = model.predict ( np.expand_dims(np.expand_dims(a01,axis=0),axis=3) ) 
+              res0 = model.predict ( np.expand_dims(a01,axis=0) ) 
               
           res0 = res0.squeeze()
           res0_final = np.argmax(res0,axis=2)
