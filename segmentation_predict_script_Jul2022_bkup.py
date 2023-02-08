@@ -10,6 +10,7 @@ from tensorflow.keras import layers
 from tensorflow import keras
 from keras import backend as K
 import math
+import cv2 as cv
 
 import tensorflow_addons as tfa
 import tensorflow as tf
@@ -223,7 +224,7 @@ def create_vec_layer(raster,threshold={'constant':5}):
         DESCRIPTION: vectorized layers with zeros removed (size: Num_layers x Nt)
     
     Example usage:
-        vec_layer = create_vec_layer(res0_final, 10)
+        vec_layer = create_vec_layer(res0_hard_threshold, 10)
 
     '''
     
@@ -234,19 +235,14 @@ def create_vec_layer(raster,threshold={'constant':5}):
     bin_rows,bin_cols = diff_temp[:,0], diff_temp[:,1]    
     bin_rows +=1 # Correct offset
     
+    min_jump = 5
+    
     if 'constant' in threshold.keys():
         threshold = threshold['constant'] * np.ones(shape=(1000,))
     else: # exponentially increasing threshold. 
           #  TO DO: Add two forms of exponential: fast increasing and slowly increasing
         threshold = np.round( list( threshold.values())[0] *np.exp(0.008*np.linspace(1,1000,1000)) )
-           
-    #threshold = np.round( threshold*np.exp(0.008*np.linspace(1,100,100)) )
-    #threshold = 7
-
-    #brk_points = [ idx for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold ]   #np.diff(bin_rows)
-    #brk_pt_chk = [ (idx,bin_rows[idx],value) for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold] 
-    
-    
+        
     # Initialize
     brk_points = [ 0 ] 
     vec_layer = np.zeros( shape=(1,Nx) ) # Total number of layers is not known ahead of time
@@ -259,40 +255,51 @@ def create_vec_layer(raster,threshold={'constant':5}):
     count = 0
     
     while brk_pt_start < len(bin_rows) :
-        if ( np.diff(bin_rows[brk_pt_start:brk_pt_stop] ) > threshold[count] ).any():
-            tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop]) > threshold[count] )[0] #int(threshold[count])
-            if len(tmp_res)>1:
-                brk_pt_stop = (tmp_res[tmp_res>0][0] + brk_pt_start).item()
+        if ( np.diff(bin_rows[brk_pt_start:brk_pt_stop] ) >= min_jump ).any():
+            
+            max_jump = np.max( np.diff(bin_rows[brk_pt_start:brk_pt_stop]) )
+            max_jump = max(max_jump, min_jump)
+            
+            threshold_to_use = threshold[count] if (np.diff(bin_rows[brk_pt_start:brk_pt_stop] ) >= threshold[count]).any() else max_jump #and threshold[count]>max_jump 
+            
+            exact_brk_point = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop]) >= threshold_to_use )[0] #int(threshold[count])
+            if len(exact_brk_point)>1:
+                brk_pt_stop = (exact_brk_point[exact_brk_point>0][-1] + brk_pt_start).item()
             else:
-                brk_pt_stop = (tmp_res  + brk_pt_start ).item()
+                brk_pt_stop = (exact_brk_point  + brk_pt_start ).item()
         else:
             if brk_pt_stop < len(bin_rows):     
                 
-                # There was no "jump" in the last Nx; Add extra Nx to brk_pt_stop to create brk_pt_stop2
-                brk_pt_stop2 = brk_pt_stop + Nx 
-                tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) > threshold[count] )[0] 
+                # There was no "jump" in the last Nx or difference was slightly lesser than threshold
+                # Add extra Nx to brk_pt_stop to create brk_pt_stop2
+                
+                brk_pt_stop2 = brk_pt_stop + Nx  # New initial value for brk_pt_stop2
+                exact_brk_point = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) > threshold[count] )[0] 
                 
                 max_diff = np.max( np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) )
-                max_stop = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0][0] 
+                # max_stop = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0][0] 
                 
-                if len(tmp_res) == 0: # None of the diff (first derivative) is greater than thresh, so just find the max derivative                    
-                    tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0] 
-                    tmp_res = tmp_res[::-1]
-
-                brk_pt_stop2 =  (tmp_res[tmp_res>0][0] + brk_pt_start).item() if len(tmp_res)>1 else  (tmp_res  + brk_pt_start ).item()                             
+                if len(exact_brk_point) == 0: # None of the diff (first derivative) is greater than thresh, so just find the max derivative                    
+                    exact_brk_point = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0] 
+                    exact_brk_point = exact_brk_point[::-1] 
                 
+                ## Change exact_brk_point to a single value in case len(exact_brk_point) >1
+                exact_brk_point = exact_brk_point[exact_brk_point>0][0].item() if len(exact_brk_point)>1 else  exact_brk_point.item() 
+                
+                ## Set the appropriate brk_pt_stop
+                
+                brk_pt_stop =  (exact_brk_point  + brk_pt_start ) if exact_brk_point <= Nx else (brk_pt_start  + Nx )
+                brk_pt_start2, brk_pt_stop2 = None, None 
+                                         
             else:
-                # Should be the last layer
-                brk_pt_stop2 = len(bin_rows)    
+                # There are less than Nx bin_rows left - should be the last layer
+                brk_pt_stop = len(bin_rows)   
                                              
             
-            # Change temmp_res to a single value in case len(tmp_res) >1
-            tmp_res = tmp_res[tmp_res>0][0].item() if len(tmp_res)>1 else  tmp_res.item() # Confirm this
-            
-            brk_pt_stop = brk_pt_stop2 - max_stop
-            # brk_pt_stop = brk_pt_stop2 - Nx # This might not be correct
-            brk_pt_start2 = brk_pt_stop + 1 if brk_pt_stop2 < len(bin_rows) else brk_pt_start
-                
+            # NEED TO CONFIRM THIS
+            # brk_pt_stop = brk_pt_stop2 - max_stop # brk_pt_stop = brk_pt_stop2 - Nx # This might not be correct          
+            # brk_pt_start2 = brk_pt_stop if brk_pt_stop2 < len(bin_rows) else brk_pt_start
+
         if brk_pt_stop > brk_pt_start:            
             vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
             used_cols = bin_cols[brk_pt_start:brk_pt_stop+1] # Added extra 1 because of zero indexing
@@ -309,6 +316,122 @@ def create_vec_layer(raster,threshold={'constant':5}):
              
             vec_layer[-1, used_cols ] = used_rows                                   
             brk_points.append( (brk_pt_start,brk_pt_stop,brk_pt_stop-brk_pt_start, list(used_rows) ) )
+        
+        if brk_pt_start2 and brk_pt_stop2:
+            vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
+            used_cols = bin_cols[brk_pt_start2:brk_pt_stop2 +1 ]
+            used_rows = bin_rows[brk_pt_start2:brk_pt_stop2 +1 ]                
+            _,used_cols_unq = np.unique(used_cols,return_index=True)
+            
+            used_cols = used_cols[used_cols_unq]
+            used_rows = used_rows[used_cols_unq]
+             
+            vec_layer[-1, used_cols ] = used_rows                                   
+            brk_points.append( (brk_pt_start2,brk_pt_stop2,brk_pt_stop2-brk_pt_start2, list(used_rows) ) )
+            
+            brk_pt_start, brk_pt_stop = brk_pt_start2, brk_pt_stop2 # Set the new brk_points to the latest one                                               
+        
+        brk_pt_start = brk_pt_stop + 1
+        brk_pt_stop = brk_pt_start + Nx + 5 # Adding extra one to complete Nx and realizing Python indexing w/o last element
+        
+        brk_pt_stop2 = brk_pt_start2 = None           
+         
+        count +=1 
+        
+    return vec_layer
+
+
+
+##==============================================================================##
+## Create_vec_layer2
+##==============================================================================##
+# =============================================================================
+def create_vec_layer2(raster,threshold={'constant':5}):
+    '''              
+    Parameters
+    ----------
+    raster : TYPE: numpy array
+        DESCRIPTION: raster vector with lots of zeros (size Nx * Nt)
+    threshold : TYPE: int (scalar)
+        DESCRIPTION: Determines the minimum jump between 2 consecutive layers
+
+    Returns
+    -------
+    vec_layer : TYPE: numpy array
+        DESCRIPTION: vectorized layers with zeros removed (size: Num_layers x Nt)
+    
+    Example usage:
+        vec_layer = create_vec_layer(res0_hard_threshold, 10)
+
+    '''
+    
+    #TO DO: Check type of raster; should be numpy array
+    
+    diff_temp = np.argwhere(raster) #raster.nonzero()
+    Nx = raster.shape[-1]
+    bin_rows,bin_cols = diff_temp[:,0], diff_temp[:,1]    
+    bin_rows +=1 # Correct offset
+    
+    if 'constant' in threshold.keys():
+        threshold = threshold['constant'] * np.ones(shape=(100,))
+    else:
+        threshold = np.round( list( threshold.values())[0] *np.exp(0.008*np.linspace(1,100,100)) )
+           
+    #threshold = np.round( threshold*np.exp(0.008*np.linspace(1,100,100)) )
+    #threshold = 7
+
+    #brk_points = [ idx for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold ]   #np.diff(bin_rows)
+    #brk_pt_chk = [ (idx,bin_rows[idx],value) for (idx,value) in enumerate(np.diff(bin_rows)) if value > threshold] 
+    
+    
+    # Initialize
+    brk_points = [ 0 ] 
+    vec_layer = np.zeros( shape=(1,Nx) ) # Total number of layers is not known ahead of time
+    
+    # Initializations
+    brk_pt_start = 0;  brk_pt_stop = Nx;
+    brk_pt_start2,brk_pt_stop2 = None, None
+    
+    count = 0
+    
+    while brk_pt_start < len(bin_rows) :
+        if ( np.diff(bin_rows[brk_pt_start:brk_pt_stop] ) > threshold[count] ).any():
+            tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop]) > threshold[count] )[0] #int(threshold[count])
+            if len(tmp_res)>1:
+                brk_pt_stop = (tmp_res[tmp_res>0][0] + brk_pt_start).item()
+            else:
+                brk_pt_stop = (tmp_res  + brk_pt_start ).item()
+        else:
+            if brk_pt_stop < len(bin_rows):                    
+                brk_pt_stop2 = brk_pt_stop + Nx
+                tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) > threshold[count] )[0] 
+                
+                if len(tmp_res) == 0:
+                    max_diff = np.max( np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) )
+                    tmp_res = np.where(np.diff(bin_rows[brk_pt_start:brk_pt_stop2]) == max_diff )[0] 
+                    tmp_res = tmp_res[::-1]
+
+                brk_pt_stop2 =  (tmp_res[tmp_res>0][0] + brk_pt_start).item() if len(tmp_res)>1 else  (tmp_res  + brk_pt_start ).item()
+                
+            else:
+                # Should be the last layer
+                brk_pt_stop2 = len(bin_rows)                                 
+            
+            brk_pt_stop = brk_pt_stop2 - Nx # This might not be correct
+            brk_pt_start2 = brk_pt_stop + 1 if brk_pt_stop2 < len(bin_rows) else brk_pt_start
+                
+           
+        vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
+        used_cols = bin_cols[brk_pt_start:brk_pt_stop+1] # Added extra 1 because of zero indexing
+        used_rows = bin_rows[brk_pt_start:brk_pt_stop+1 ] # Added extra 1 because of zero indexing
+        
+        _,used_cols_unq = np.unique(used_cols,return_index=True)
+        
+        used_cols = used_cols[used_cols_unq]
+        used_rows = used_rows[used_cols_unq]
+         
+        vec_layer[-1, used_cols ] = used_rows                                   
+        brk_points.append( (brk_pt_start,brk_pt_stop,brk_pt_stop-brk_pt_start, list(used_rows) ) )
         
         if brk_pt_start2 and brk_pt_stop2:
             vec_layer = np.concatenate( (vec_layer,np.zeros(shape=(1,Nx)) ) )
@@ -345,33 +468,29 @@ def create_vec_layer(raster,threshold={'constant':5}):
         
     return vec_layer
 
-
-
 ##==============================================================================##
 ## # Path to data
 ##==============================================================================##    
 
 base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data'
-
+season_name = 'snow_2012_Greenland_P3'   # <= e.g 'snow2_2021_Alaska_SO', 'snow_2021_Alaska_SO',  'snow_2012_Greenland_P3' , 'mcords2_2012_Greenland_P3'
 #segments = ['20120330_02', '20120330_03', '20120404_01', '20120413_01', '20120418_01' , '20120429_01', '20120507_01', '20120508_01', '20120514_01'  ]
-segments = ['20120330_04']
+segments = ['20120413_01']   # ['20120413_01'] , ['20120418_01'],  ['20210509_01'] 
 
 for segment in segments:
     
     ## Model path and files
-    if decimated_model:
-        # model_path = f"{config['base_path']}//SimpleUNet_Binary//SimpleUNet_acc_{acc:.2f}_GOOD_{time_stamp}.h5"
+    if decimated_model:       
         # model_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\new_trainJuly\SimpleUNet_Binary\SimpleUNet_acc_0.94_GOOD_16_July_22_1152.h5'
         model_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\new_trainJuly\ConvMixer\SegAcc_ 71.88_25_August_22_0937.h5'
         
-        #model_pred_data_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Frames_ML_pred' + segment  + r'\*.mat'
         model_pred_data_path =  os.path.join(r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Frames_ML_pred',segment+'\*.mat')
         
     else:
         model_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data\SimpleUNet_Binary_large\SimpleUNet_acc_0.99_no_fixed_shape_13_October_22_0805.h5' 
         #model_pred_data_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Frames_ML_pred\20120330_04\full_size\*.mat' SimpleUNet_acc_0.99_no_fixed_shape_13_October_22_0805.h5, SimpleUNet_acc_0.99_GOOD_12_August_22_1544.h5
         
-        model_pred_data_path =  os.path.join(r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Frames_ML_pred',segment+r'\full_size\*.mat')
+        model_pred_data_path =  os.path.join(r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Frames_ML_pred',season_name, segment+  r'\full_size\*.mat')
     
         
     ## Load saved model and weights
@@ -385,82 +504,95 @@ for segment in segments:
     model = loaded_model
     
     # Legacy file paths
-    # model_pred_data_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\unlabeled_data\20120416_01\*.mat'
-    #model_pred_data_path = os.path.join(base_path,r'unlabeled_data\20120516_01\*.mat')
-    #model_pred_data_path = os.path.join(base_path,r'new_trainJuly\new_test\2012*.mat')
+    # model_pred_data_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\unlabeled_data\20120416_01\*.mat' #model_pred_data_path = os.path.join(base_path,r'unlabeled_data\20120516_01\*.mat')  #model_pred_data_path = os.path.join(base_path,r'new_trainJuly\new_test\2012*.mat')
     
     model_pred_data = sorted(glob.glob(model_pred_data_path)) 
     
-    
+    filter_x,filter_y = 11,51
+    conv_filter = np.ones(shape=(filter_x,filter_y )) 
     
 
-    
     ##==============================================================================##
     ## Visualize result of model prediction for "unseen" echogram during training
     ##==============================================================================##
     
     
     if binary_viz:    
-        batch_idx = 0 #random.randint(1,len(model_pred_data) - 10) # Pick any of the default batch
+        batch_idx = random.randint(0 ,len(model_pred_data) - 10) if len(model_pred_data) >=10 else 0  # Pick any of the default batch
         
-        for idx in range(1,10):
+        for idx in range(min(10,len(model_pred_data) ) ):
+ 
           predict_data = loadmat(model_pred_data[batch_idx+idx])
-          #a01,a_gt0 = predict_data['echo_tmp'], predict_data['raster']
-          a01 = predict_data['echo_tmp']
+          #echo_tmp,a_gt0 = predict_data['echo_tmp'], predict_data['raster']
+          echo_tmp = predict_data['echo_tmp']
           
           if model.input_shape[-1]  >1:
-              a0 = np.stack((a01,)*3,axis=-1)
+              a0 = np.stack((echo_tmp,)*3,axis=-1)
               res0 = model.predict ( np.expand_dims(a0,axis=0))
           else:
-              res0 = model.predict ( np.expand_dims(np.expand_dims(a01,axis=0),axis=3) ) 
+              res0 = model.predict ( np.expand_dims(np.expand_dims(echo_tmp,axis=0),axis=3) ) 
               
-          res0 = res0.squeeze()
-          # res0_final = np.argmax(res0,axis=2)
-          res0_final = np.where(res0>0.04,1,0)
-          
-          res2 = res0_final.copy() ; res2 = sc_med_filt(res2,size =11) 
-          
-          res_Nt,res_Nx = res0_final.shape          
+          res0 = res0.squeeze() # Probability map output of the model
+          res0_hard_threshold = np.where(res0>0.1,1,0) # Threshold should be adaptive (based on pmap)        
+                    
 
-          res0_final1 = np.arange(1,res_Nt+1).reshape(res_Nt,1) * fix_final_prediction(res0,res2,closeness=25)
+         # Remove islands and discontinuities in thresholded predictions
+          res0_island_rmv = res0_hard_threshold.copy() ; 
+          conv_vals = cv.filter2D(res0_island_rmv, -1, conv_filter, borderType=cv.BORDER_CONSTANT)          
+          res0_island_rmv[conv_vals < np.max(conv_vals)//1.5] = 0 # Remove island predictions
           
-          b = np.ones((5,))/5; a = 1    
-          res0_final2 = np.ceil( filtfilt(b,a,res0_final1, axis =-1) ) 
-          # How correct is create_vec_layer??
-          thresh = {'constant': 15}
-          z = create_vec_layer(res0_final1,thresh); 
+          # Filter probability map??
+          b = np.ones((15,))/15; a = 1    
+          prob_map_filtered = filtfilt(b,a,res0.T).T 
           
-          z[z==0] = np.nan;
-          z_filtered = z.copy()
-          z_filtered[:] = np.nan
+          res_Nt,res_Nx = res0_hard_threshold.shape          
+
+          res0_hard_threshold1 = np.arange(1,res_Nt+1).reshape(res_Nt,1) * fix_final_prediction(prob_map_filtered,res0_island_rmv,closeness=15)
           
-          b = (np.ones((7,1))/7).squeeze(); a = 1;
-          for chan in range(z.shape[0] - 1):
-              z_curr = z[chan,:]
-              if ~np.all(np.isnan(z_curr)) and len(z_curr[~np.isnan(z_curr)]) > 21:
+          thresh = {'constant': 20} # This determines the minimum seperation between layers
+          new_layer = create_vec_layer2(res0_hard_threshold1,thresh); 
+          
+          new_layer[new_layer==0] = np.nan;
+          new_layer_filtered = new_layer.copy()          
+          new_layer_filtered[:] = np.nan         
+
+          for chan in range(new_layer.shape[0]):
+              new_layer_curr = new_layer[chan,:]
+              if ~np.all(np.isnan(new_layer_curr)) and len(new_layer_curr[~np.isnan(new_layer_curr)]) > 21:
                   # z_curr[np.isnan(z_curr)] = 0
-                  z_filtered[chan,:] =  sc_med_filt(z_curr, size=15).astype('int32') #sc_med_filt(z,size=3)
+                  new_layer_filtered[chan,:] =  sc_med_filt(new_layer_curr, size=35).astype('int32') #sc_med_filt(z,size=3)
+              else:
+                  new_layer_filtered[chan,:] = np.nan
           
-          z_filtered [ z_filtered< 0] = np.nan
           
-          f, axarr = plt.subplots(1,5,figsize=(20,20))
+          new_layer_filtered [ new_layer_filtered< 0] = np.nan
+          
+          # Finish this later
+          # del_idx = np.sum( np.isnan(z_filtered).astype(int), axis = 1)
+          # del_idx = (del_idx < res_Nx//3)         
+          # z_filtered = np.delete(z_filtered,del_idx, 0) 
+          
+          f, axarr = plt.subplots(1,6,figsize=(20,20))
         
-          axarr[0].imshow(a01.squeeze(),cmap='gray_r')
+          axarr[0].imshow(echo_tmp.squeeze(),cmap='gray_r')
           axarr[0].set_title( f'Echo {os.path.basename(model_pred_data[batch_idx+idx])}') #.set_text
           
-          axarr[1].imshow(res0_final, cmap='viridis' )
-          axarr[1].set_title('Prediction before threshold') 
+          axarr[1].imshow(echo_tmp.squeeze(),cmap='viridis')
+          axarr[1].set_title( 'Echo orig map') #.set_text
           
-          axarr[2].imshow(res0_final1.astype(bool).astype(int), cmap='viridis' )
-          axarr[2].set_title('Prediction') 
-
-          axarr[3].plot(z.T) # gt
-          axarr[3].invert_yaxis()
-          axarr[3].set_title( f'Vec_layer({thresh})') #.set_text
+          axarr[2].imshow(prob_map_filtered, cmap='viridis' )
+          axarr[2].set_title('Prob_map_filtered') 
           
-          axarr[4].imshow(a01.squeeze(),cmap='gray_r')          
-          axarr[4].plot(z_filtered.T) # gt
-          axarr[4].set_title( 'Overlaid prediction') #.set_text
+          axarr[3].imshow(res0_hard_threshold, cmap='viridis' )
+          axarr[3].set_title('Thresholded Prediction [res0_hard_threshold]') 
+          
+          axarr[4].plot(new_layer.T) # gt
+          axarr[4].invert_yaxis()
+          axarr[4].set_title( f'Vec_layer({thresh})') #.set_text
+          
+          axarr[5].imshow(echo_tmp.squeeze(),cmap='gray_r')          
+          axarr[5].plot(new_layer_filtered.T) # gt
+          axarr[5].set_title( 'Overlaid prediction') #.set_text
           #axarr[2].set_title( f'Ground truth {os.path.basename(model_pred_data[batch_idx])}') #.set_text
           
           
@@ -477,32 +609,32 @@ for segment in segments:
         
         for idx in range(1,10):
           predict_data = loadmat(model_pred_data[batch_idx+idx])
-          #a01,a_gt0 = predict_data['echo_tmp'], predict_data['raster']
-          a01 = predict_data['echo_tmp']
+          #echo_tmp,a_gt0 = predict_data['echo_tmp'], predict_data['raster']
+          echo_tmp = predict_data['echo_tmp']
           
           if model.input_shape[-1] == 3:
-              a0 = np.stack((a01,)*3,axis=-1)
+              a0 = np.stack((echo_tmp,)*3,axis=-1)
               res0 = model.predict ( np.expand_dims(a0,axis=0))
           else:
-              res0 = model.predict ( np.expand_dims(a01,axis=0) ) 
+              res0 = model.predict ( np.expand_dims(echo_tmp,axis=0) ) 
               
           res0 = res0.squeeze()
-          res0_final = np.argmax(res0,axis=2)
-          #res0_final = np.where(res0>0.1,1,0)
+          res0_hard_threshold = np.argmax(res0,axis=2)
+          #res0_hard_threshold = np.where(res0>0.1,1,0)
           
-          res0_final1 = sc_med_filt( sc_med_filt(res0_final.T,size=7).T, size= 7)
+          res0_hard_threshold1 = sc_med_filt( sc_med_filt(res0_hard_threshold.T,size=7).T, size= 7)
           
     
         
           f, axarr = plt.subplots(1,3,figsize=(20,20))
         
-          axarr[0].imshow(a01.squeeze(),cmap='gray_r')
+          axarr[0].imshow(echo_tmp.squeeze(),cmap='gray_r')
           axarr[0].set_title( f'Echo {os.path.basename(model_pred_data[batch_idx])}') #.set_text
           
-          axarr[1].imshow(res0_final, cmap='viridis' )
+          axarr[1].imshow(res0_hard_threshold, cmap='viridis' )
           axarr[1].set_title('Prediction')
           
-          axarr[2].imshow(res0_final1, cmap='viridis' )
+          axarr[2].imshow(res0_hard_threshold1, cmap='viridis' )
           axarr[2].set_title('Filtered Prediction')
     
     
@@ -512,17 +644,18 @@ for segment in segments:
     
     
     if run_predictions:
-    
+        # CHANGE THIS!!!
+        
         for iter in range(len(model_pred_data)): #len(model_pred_data)
             # Load mat file
             predict_data = loadmat(model_pred_data[iter])
             
             # Load echo file
-            a01 =  predict_data['echo_tmp']
+            echo_tmp =  predict_data['echo_tmp']
             
             # Check model type and predict    
             if model.input_shape[-1]  >1:
-                a0 = np.stack((a01,)*3,axis=-1)
+                a0 = np.stack((echo_tmp,)*3,axis=-1)
                 res0 = model.predict ( np.expand_dims(a0,axis=0))
             else:
                 res0 = model.predict ( np.expand_dims(np.expand_dims(a0,axis=0),axis=3) ) 
@@ -530,21 +663,21 @@ for segment in segments:
             res0 = res0.squeeze()
             
             # Low threshold
-            res0_final0 = np.where(res0>0.05,1,0)
+            res0_hard_threshold0 = np.where(res0>0.05,1,0)
             
-            res0_final = sc_med_filt( sc_med_filt(res0_final0.T,size=3).T, size= 3)
+            res0_hard_threshold = sc_med_filt( sc_med_filt(res0_hard_threshold0.T,size=3).T, size= 3)
             
             
             # Correct threshold and convert prediction to sparse matrix
             if decimated_model:
-                res0_final1 = np.arange(1,417).reshape(416,1) * fix_final_prediction(res0,res0_final)
+                res0_hard_threshold1 = np.arange(1,417).reshape(416,1) * fix_final_prediction(res0,res0_hard_threshold)
             else:
-                res0_final1 = np.arange(1,416*4+1).reshape(416*4,1) * fix_final_prediction(res0,res0_final)
+                res0_hard_threshold1 = np.arange(1,416*4+1).reshape(416*4,1) * fix_final_prediction(res0,res0_hard_threshold)
             
             # Convert sparse matrix to dense prediction (might have align issues: to be fixed in MATLAB)
             result ={}
             thresh = 8
-            result['ML_layer'] =  create_vec_layer(res0_final1, thresh)    
+            result['ML_layer'] =  create_vec_layer(res0_hard_threshold1, thresh)    
             
             
             # Save predictions    
