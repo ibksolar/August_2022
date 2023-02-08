@@ -30,6 +30,10 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint,TensorBoar
 from datetime import datetime
 
 from focal_loss import SparseCategoricalFocalLoss
+import segmentation_models as sm
+sm.set_framework('tf.keras')
+sm.framework()
+
 
 ## GPU Config
 gpus = tf.config.list_physical_devices('GPU')
@@ -46,35 +50,43 @@ if gpus:
     print(e)  
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
-
-## WandB config
-import wandb
-from wandb.keras import WandbCallback
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
+use_wandb = True
+if use_wandb:    
+    ## WandB config
+    import wandb
+    from wandb.keras import WandbCallback    
+    
+    wandb.init( project="my-test-project", entity="ibksolar", name= 'SimpleFCN'+time_stamp,config ={})
+    config = wandb.config
 
-wandb.init( project="my-test-project", entity="ibksolar", name='EchoViT1'+time_stamp,config ={})
-config = wandb.config
 
-
-try:
-    fname = ipynbname.name()
-except:
-    fname = os.path.splitext( os.path.basename(__file__) )[0]
-finally:
-    print ('Could not automatically find file path')
-    fname = 'blank'
 
 
 # PATHS
 # Path to data
-base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Train_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
 train_path = os.path.join(base_path,'train_data\*.mat')
-# val_path = os.path.join(base_path,'val_data\*.mat')
-test_path = os.path.join(base_path,'Test_data\*.mat')   
+train_aug_path = os.path.join(base_path,'augmented_plus_train_data\*.mat')
+val_path = os.path.join(base_path,'val_data\*.mat')
+test_path = os.path.join(base_path,'test_data\*.mat')   
 
 # Create tf.data.Dataset
 config['batch_size'] = 16
-config['num_classes'] = 30
+config['num_classes'] = 1
+
+
+# Training params
+config['img_y'] = 416*4
+config['img_x'] = 64*4
+
+config['img_channels'] = 3
+config['weight_decay'] = 0.0001
+
+config['num_classes'] = 1 #30
+config['epochs'] = 150
+config['learning_rate'] = 1e-3
+config['base_path'] = base_path
 SEED = 42
 AUTO = tf.data.experimental.AUTOTUNE
 
@@ -130,28 +142,35 @@ def read_mat(filepath):
         filepath = bytes.decode(filepath.numpy())      
         mat_file = loadmat(filepath)
         echo = tf.cast(mat_file['echo_tmp'], dtype=tf.float64)
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)      
-
+        
+        echo = tf.expand_dims(echo, axis=-1)        
+        if config['img_channels'] > 1:
+            echo = tf.image.grayscale_to_rgb(echo)
+        
+        # layer = tf.cast(mat_file['raster'], dtype=tf.float64)      
+        layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float64)
+        
+        layer = tf.expand_dims(layer, axis=-1)
         # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
-        shape0 = mat_file['echo_tmp'].shape        
+        shape0 = echo.shape #mat_file['echo_tmp'].shape        
         return echo,layer,np.asarray(shape0)     
     
     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
     shape = output[2]
     data0 = tf.reshape(output[0], shape)
-    data0.set_shape([416,64])
+    data0.set_shape([config['img_y'],config['img_x'],config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64])   #,30 
+    data1.set_shape([config['img_y'],config['img_x'],1]) #,30   
     return data0,data1
 
-train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
-train_ds = train_ds.map(read_mat_train,num_parallel_calls=8)
+train_ds = tf.data.Dataset.list_files(train_aug_path,shuffle=True) #'*.mat'
+train_ds = train_ds.map(read_mat,num_parallel_calls=8)
 train_ds = train_ds.batch(config['batch_size'],drop_remainder=True).prefetch(AUTO) #.shuffle(buffer_size = 100 * config['batch_size'])
 
-# val_ds = tf.data.Dataset.list_files(val_path,shuffle=True)
-# val_ds = val_ds.map(read_mat,num_parallel_calls=8)
-# val_ds = val_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
+val_ds = tf.data.Dataset.list_files(val_path,shuffle=True)
+val_ds = val_ds.map(read_mat,num_parallel_calls=8)
+val_ds = val_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 test_ds = tf.data.Dataset.list_files(test_path,shuffle=True)
 test_ds = test_ds.map(read_mat,num_parallel_calls=8)
@@ -163,21 +182,17 @@ train_shape = train_shape[0]
 print(f' X_train train shape {train_shape[0]}')
 print(f' Training target shape {train_shape[1]}')
 
-# Training params
-config={}
-config['epochs'] = 700
-config['learning_rate'] = 1e-3
-config['num_classes']= 30
+
 
 # Custom Loss
-newFocalLoss = SparseCategoricalFocalLoss(gamma=2, from_logits= True)
+newFocalLoss = sm.losses.BinaryFocalLoss() #SparseCategoricalFocalLoss(gamma=2, from_logits= True)
 
-input_shape = (416, 64)
+input_shape = (config['img_y'], config['img_x'],config['img_channels'])
 #Build the model        
 inputs = tf.keras.layers.Input(shape = input_shape)
 #s = tf.keras.layers.Lambda(lambda x: x / 255)(inputs)
 
-inputs = tf.expand_dims(inputs, axis=-1)
+#inputs = tf.expand_dims(inputs, axis=-1)
 
 #Contraction path
 c1 = tf.keras.layers.Conv2D(16, (17, 13), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
@@ -275,7 +290,7 @@ outputs = tf.keras.layers.Conv2D(config['num_classes'], (1, 1), padding="same", 
 
 model = tf.keras.Model(inputs,outputs)
 opt = keras.optimizers.Adam(learning_rate=config['learning_rate'])
-model.compile(optimizer= 'NAdam', loss= newFocalLoss, metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
+model.compile(optimizer= 'Adam', loss= newFocalLoss, metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
 
 config['base_path'] = base_path
 config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
