@@ -47,12 +47,12 @@ tf.keras.mixed_precision.set_global_policy('mixed_float16')
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 
 
-use_wandb = False
+use_wandb = True
 if use_wandb:
     ## WandB config
     import wandb
     from wandb.keras import WandbCallback
-    wandb.init( project="my-test-project", entity="ibksolar", name='SimpleUNet_binary_large'+time_stamp,config ={})
+    wandb.init( project="my-test-project", entity="ibksolar", name='SimpleUNet_binary_large_augmented'+time_stamp,config ={})
     config = wandb.config
 else:
     config={}
@@ -69,6 +69,8 @@ finally:
 # PATHS
 # Path to data
 base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+
+train_aug_path = os.path.join(base_path,'augmented_plus_train_data\*.mat')
 train_path = os.path.join(base_path,'train_data\*.mat')
 val_path = os.path.join(base_path,'val_data\*.mat')
 test_path = os.path.join(base_path,'test_data\*.mat')   
@@ -81,11 +83,12 @@ img_x = 256
 
 # Training params
 #config={}
+config['Run_Notes'] = 'SimpleUNet on augmented data'
 config['img_channels'] = 3
 
 config['num_classes'] = 1
 config['epochs'] = 500
-config['learning_rate'] = 1e-3
+config['learning_rate'] = 1e-4
 config['base_path'] = base_path
 SEED = 42
 AUTO = tf.data.experimental.AUTOTUNE
@@ -165,31 +168,37 @@ def read_mat(filepath):
         filepath = bytes.decode(filepath.numpy())      
         mat_file = loadmat(filepath)
         echo = tf.cast(mat_file['echo_tmp'], dtype=tf.float64)
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)      
-
-        layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
-        shape0 = mat_file['echo_tmp'].shape        
+        echo = tf.expand_dims(echo, axis=-1) 
+        
+        if config['img_channels'] > 1:
+            echo = tf.image.grayscale_to_rgb(echo)
+        
+        # layer = tf.cast(mat_file['raster'], dtype=tf.float64)
+        layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float64)
+        layer = tf.expand_dims(layer, axis=-1)
+        
+        shape0 = echo.shape        
         return echo,layer,np.asarray(shape0)     
     
     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
     shape = output[2]
     data0 = tf.reshape(output[0], shape)
-    data0.set_shape([1664,256])
+    data0.set_shape([1664,256,config['img_channels'] ])
     
     data1 = output[1]   
     data1.set_shape([1664,256,config['num_classes']  ]) #,30, ,config['num_classes']    
     return data0,data1
 
-train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
-train_ds = train_ds.map(read_mat_train,num_parallel_calls=8)
+train_ds = tf.data.Dataset.list_files(train_aug_path,shuffle=True) #'*.mat'
+train_ds = train_ds.map(read_mat,num_parallel_calls=8)
 train_ds = train_ds.batch(config['batch_size'],drop_remainder=True).prefetch(AUTO) #.shuffle(buffer_size = 100 * config['batch_size'])
 
 val_ds = tf.data.Dataset.list_files(val_path,shuffle=True)
-val_ds = val_ds.map(read_mat_train,num_parallel_calls=8)
+val_ds = val_ds.map(read_mat,num_parallel_calls=8)
 val_ds = val_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 test_ds = tf.data.Dataset.list_files(test_path,shuffle=True)
-test_ds = test_ds.map(read_mat_train,num_parallel_calls=8)
+test_ds = test_ds.map(read_mat,num_parallel_calls=8)
 test_ds = test_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 train_shape = [ ( tf.shape(item[0]).numpy(),tf.shape(item[1]).numpy() ) for item in train_ds.take(1) ]
@@ -334,17 +343,17 @@ model = tf.keras.Model(inputs,outputs)
 opt = keras.optimizers.Adam(learning_rate=config['learning_rate'])
 opt2 = tfa.optimizers.AdamW(weight_decay = 0.001, learning_rate = config['learning_rate'])
 
-model.compile(optimizer= opt, loss= "binary_crossentropy", metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
+model.compile(optimizer= opt2, loss= "binary_crossentropy", metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
 
 config['base_path'] = base_path
 config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 logz= f"{config['base_path']}/SimpleUNet//{config['start_time']}_logs/"
 callbacks = [
    ModelCheckpoint(f"{config['base_path']}//SimpleUNet_Binary//SimpleUNet_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.000005, verbose= 1),
-    EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
+    ReduceLROnPlateau(monitor="val_loss", factor=0.55, patience=15, min_lr=0.000005, verbose= 1),
+    EarlyStopping(monitor="val_loss", patience=35, verbose=1), 
     TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
-    #WandbCallback()
+    WandbCallback()
 ]
 
 
@@ -367,14 +376,23 @@ model_val_data = glob.glob(model_val_data_path)
 ## Final prediction correcting code
 from itertools import groupby
 
-def fix_final_prediction(a, a_final):
+def fix_final_prediction(a, a_final, closeness = 10):
+    """
+    inputs: a --> raw probabilities
+            a_final --> thresholded_probability
+            
+    output: a_final --> Overwrites input to return binary mask  
+    """
     for col_idx in range(a_final.shape[1]):
+        
+        # Find groups of 0s and 1s
         repeat_tuple = [ (k,sum(1 for _ in groups)) for k,groups in groupby(a_final[:,col_idx]) ]
+        # Cumulate the returned index
         rep_locs = np.cumsum([ item[1] for item in repeat_tuple])
         
         # Temporary hack
-        rep_locs[-1] = rep_locs[-1] - 1
-        
+        rep_locs[-1] = rep_locs[-1] - 1          
+
         locs_to_fix = [ (elem[1],rep_locs[idx]) for idx,elem in enumerate(repeat_tuple) if elem[0]== 1 and elem[1]>1 ]
         
         for elem0 in locs_to_fix:
@@ -382,6 +400,26 @@ def fix_final_prediction(a, a_final):
             max_loc = check_idx[0] + np.argmax(a[elem0[1]-elem0[0]:elem0[1], col_idx])
             check_idx.remove(max_loc)            
             a_final[check_idx,col_idx] = 0
+        
+        ## Section to find ones whose index are close and remove those with lower probabilities
+        
+        # Find groups of 0s and 1s the second time after repeated 1s have been removed.
+        repeat_tuple = [ (k,sum(1 for _ in groups)) for k,groups in groupby(a_final[:,col_idx]) ]            
+        rep_locs = np.cumsum([ item[1] for item in repeat_tuple]) # Cumulate the returned index
+        
+        one_locs_idx = [(idx,rep_locs[idx]) for idx,iter in enumerate(repeat_tuple) if iter[0] ==1 ]
+        one_locs = [item[1] for item in one_locs_idx] # Just the locs of the 1s 
+        
+        if np.any( np.diff(one_locs, prepend = 0) < closeness ): # Check if any 1s has index less than 5 to the next 1                 
+            
+            close_locs_idx = np.where(np.diff(one_locs, prepend = 0) < closeness )[0]                
+            
+            for item in close_locs_idx:
+                # Compare the probs of the "1" before the close 
+                check1, check2 = one_locs[item-1]-1, one_locs[item]-1 # Indexing is off by one
+                min_chk = check1 if a[check1,col_idx] < a[check2,col_idx] else check2
+                a_final[min_chk, col_idx] = 0
+        
     
     return a_final
 
@@ -408,9 +446,10 @@ for idx in range(1,10):
   else:
       res0 = model.predict ( np.expand_dims(np.expand_dims(a0,axis=0),axis=3) ) 
       
-  res0 = res0.squeeze()
+  res0 = res0.squeeze()  
+
   #res0_final = np.argmax(res0,axis=2)
-  res0_final = np.where(res0>0.05,1,0)
+  res0_final = np.where(res0>0.04,1,0)
   
   res0_final1 = np.arange(1,img_y+1).reshape(img_y,1) * fix_final_prediction(res0,res0_final)
 
@@ -426,10 +465,9 @@ for idx in range(1,10):
   axarr[2].set_title( f'Ground truth {os.path.basename(model_val_data[batch_idx])}') #.set_text
 
 
-
-
-
-
+######################################################################
+# Helper functions
+######################################################################
 
 def zero_runs(a):  # from link
     iszero = np.concatenate(([0], np.equal(a, 0).view(np.int8), [0]))
