@@ -37,7 +37,7 @@ sm.set_framework('tf.keras')
 sm.framework()
 
 from datetime import datetime
-from focal_loss import BinaryFocalLoss
+# from focal_loss import BinaryFocalLoss
 
 ## GPU Config
 gpus = tf.config.list_physical_devices('GPU')
@@ -56,7 +56,7 @@ tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 
 ## WandB config
-use_wandb = False
+use_wandb = True
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 
 if use_wandb:    
@@ -69,19 +69,12 @@ if use_wandb:
 else:
     config ={}
 
-try:
-    fname = ipynbname.name()
-except:
-    fname = os.path.splitext( os.path.basename(__file__) )[0]
-finally:
-    print ('Could not automatically find file path')
-    fname = 'blank'
 
 
 
 # PATHS
 # Path to data
-base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\SR_Dataset_v1\Dec'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+base_path = r'U:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
 train_path = os.path.join(base_path,'train_data\*.mat')
 train_aug = os.path.join(base_path,'augmented_data\*.mat')
 val_path = os.path.join(base_path,'val_data\*.mat')
@@ -90,7 +83,7 @@ test_path = os.path.join(base_path,'test_data\*.mat')
 
 # Create tf.data.Dataset
 
-config['img_y'] = 416 #1664 #1664 , 416
+config['img_y'] = 1664 #1664 #1664 , 416
 config['img_x'] = 256 #256, 64
 
 config['batch_size'] = 16
@@ -536,7 +529,7 @@ callbacks = [
     ModelCheckpoint(f"{config['base_path']}//AttUNet//AttUNet_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
     ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=10, min_lr=0.00001),
     EarlyStopping(monitor="val_loss", patience=50, verbose=1),
-    #WandbCallback()    
+    WandbCallback()    
 ]
 
 # Poly Rate scheduler
@@ -578,7 +571,7 @@ binary_loss = sm.losses.BinaryFocalLoss()
 if config['num_classes']  > 1:
     model.compile( optimizer=opt4,loss= tf.keras.losses.CategoricalCrossentropy() , metrics=[sm.metrics.iou_score,'accuracy'] ) # sm.metrics.iou_score,'categorical_crossentropy', sparse_categorical_accuracy", tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.3)
 else:
-    model.compile( optimizer=opt4, loss= binary_loss, metrics=['accuracy']) #binary_crossentropy, 'binary_crossentropy',sm.metrics.iou_score,
+    model.compile( optimizer=opt4, loss= 'binary_crossentropy', metrics=['accuracy']) #binary_crossentropy, 'binary_crossentropy',sm.metrics.iou_score,
 
 history = model.fit(train_ds, epochs= config['epochs'], validation_data= val_ds, callbacks = callbacks) # , callbacks = callbacks)   mcp_save, callbacks=[reduce_lr_loss]
 

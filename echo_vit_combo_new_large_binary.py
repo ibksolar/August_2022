@@ -28,8 +28,12 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint,TensorBoar
 import segmentation_models as sm
 from datetime import datetime
 
-import keras_nlp
+# from albumentations import (
+#     Compose, RandomBrightness, VerticalFlip,ElasticTransform,GaussianBlur,RandomBrightnessContrast
+    
+# )
 
+from focal_loss import SparseCategoricalFocalLoss
 
 ## GPU Config
 gpus = tf.config.list_physical_devices('GPU')
@@ -55,7 +59,7 @@ if use_wandb:
     import wandb
     from wandb.keras import WandbCallback    
     
-    wandb.init( project="my-test-project", entity="ibksolar", name='EchoViT1'+time_stamp,config ={})
+    wandb.init( project="my-test-project", entity="ibksolar", name='EchoViT_combo_new'+time_stamp,config ={})
     config = wandb.config
 else:
     config ={}
@@ -75,21 +79,22 @@ finally:
 # Path to data
 base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
 train_path = os.path.join(base_path,'train_data\*.mat')
-train_aug_path = os.path.join(base_path,'augment_plus_train_data\*.mat')
 val_path = os.path.join(base_path,'val_data\*.mat')
-test_path = os.path.join(base_path,'test_data\*.mat')   
+test_path = os.path.join(base_path,'test_data\*.mat')    
 
 # Create tf.data.Dataset
 config['Run_Note'] = 'Trying combined fast time and slow time embed'
 config['batch_size'] = 4
 
 # Training params
-#config={}
+config['img_y'] = 416*4
+config['img_x'] = 64*4
+
 config['img_channels'] = 3
 
-config['num_classes'] = 30
+config['num_classes'] = 1 #30
 config['epochs'] = 500
-config['learning_rate'] = 1e-3
+config['learning_rate'] = 3e-3
 config['base_path'] = base_path
 SEED = 42
 AUTO = tf.data.experimental.AUTOTUNE
@@ -122,7 +127,7 @@ def read_mat_heavy_aug(filepath):
             #echo = tf.clip_by_value(echo, 0, 1) 
             
             # # Random Add
-            echo = echo + tf.random.normal(shape=(416,64,config['img_channels']),stddev=0.5,dtype=tf.float64)
+            echo = echo + tf.random.normal(shape=(config['img_y'],config['img_x'],config['img_channels']),stddev=0.5,dtype=tf.float64)
             #echo = tf.clip_by_value(echo, 0, 1)  
             
             # Random contrast
@@ -139,7 +144,7 @@ def read_mat_heavy_aug(filepath):
             #echo = tf.clip_by_value(echo, 0, 1) 
             
             # # Random Subtract
-            echo = echo - tf.random.normal(shape=(416,64,config['img_channels']),stddev=0.5,dtype=tf.float64)
+            echo = echo - tf.random.normal(shape=(config['img_y'],config['img_x'],config['img_channels']),stddev=0.5,dtype=tf.float64)
             # #echo = tf.clip_by_value(echo, 0, 1)       
                 
             # Random brightness
@@ -176,10 +181,10 @@ def read_mat_heavy_aug(filepath):
     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
     shape = output[2]
     data0 = tf.reshape(output[0], shape)
-    data0.set_shape([416,64,config['img_channels']])
+    data0.set_shape([config['img_y'],config['img_x'],config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64,30])#,30    
+    data1.set_shape( [config['img_y'],config['img_x'],config['num_classes']] )#,30    
     return data0,data1
 
 
@@ -197,7 +202,7 @@ def read_mat_train(filepath):
         if config['img_channels'] > 1:
             echo = tf.image.grayscale_to_rgb(echo)
         
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)
+        layer = tf.cast(mat_file['semantic_seg2'], dtype=tf.float64)
         
         # Data Augmentation
         
@@ -212,7 +217,7 @@ def read_mat_train(filepath):
             echo = echo - 0.3
         
         elif aug_type == 3: # Random noise
-            echo = echo - tf.random.normal(shape=(416,64,config['img_channels']),stddev=0.5,dtype=tf.float64)
+            echo = echo - tf.random.normal(shape=(config['img_y'],config['img_x'],config['img_channels']),stddev=0.5,dtype=tf.float64)
             echo = tf.clip_by_value(echo, 0, 1)
             
         elif aug_type == 4: # Random brightness
@@ -243,11 +248,51 @@ def read_mat_train(filepath):
     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
     shape = output[2]
     data0 = tf.reshape(output[0], shape)
-    data0.set_shape([416,64,config['img_channels']])
+    data0.set_shape([config['img_y'],config['img_x'],config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64,30])#,30    
+    data1.set_shape([config['img_y'],config['img_x'],config['num_classes'] ])#,30    
     return data0,data1
+
+# =============================================================================
+# =============================================================================
+# transforms = Compose( [RandomBrightness(limit=0.1),RandomBrightnessContrast(brightness_limit=0.15,contrast_limit=0.15, p= 0.3),VerticalFlip(), ElasticTransform(alpha=0.1,sigma = 0.2)])
+
+# ## Function for albumentation dataset    
+# def read_mat_alb(filepath):
+#     def _read_mat(filepath):
+        
+#         filepath = bytes.decode(filepath.numpy())      
+#         mat_file = loadmat(filepath)
+#         echo = tf.cast(mat_file['echo_tmp'], dtype=tf.float32)
+        
+#         echo = tf.expand_dims(echo, axis=-1)        
+#         if config['img_channels'] > 1:
+#             echo = tf.image.grayscale_to_rgb(echo)
+        
+#         # layer = tf.cast(mat_file['raster'], dtype=tf.float64) 
+#         layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float32)
+        
+#         layer = tf.expand_dims(layer, axis=-1)
+        
+#         transformed = transforms(image=echo.numpy(), mask=layer.numpy() )
+        
+#         echo = tf.convert_to_tensor( transformed["image"] ,dtype=tf.float64)
+#         layer = tf.convert_to_tensor( transformed["mask"] ,dtype=tf.float64)
+        
+#         # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
+#         shape0 = echo.shape #mat_file['echo_tmp'].shape        
+#         return echo,layer,np.asarray(shape0)     
+#     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
+#     shape = output[2]
+#     data0 = tf.reshape(output[0], shape)
+#     data0.set_shape([config['img_y'],config['img_x'],config['img_channels']])
+    
+#     data1 = output[1]   
+#     data1.set_shape([config['img_y'],config['img_x'],config['num_classes']]) #,30   
+#     return data0,data1
+
+
 # =============================================================================
 ## Function for test and validation dataset    
 def read_mat(filepath):
@@ -261,20 +306,20 @@ def read_mat(filepath):
         if config['img_channels'] > 1:
             echo = tf.image.grayscale_to_rgb(echo)
         
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)      
+        layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float32)      
 
-        # layer = tf.expand_dims(layer, axis=-1)
-        layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
+        layer = tf.expand_dims(layer, axis=-1)
+        # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
         shape0 = echo.shape #mat_file['echo_tmp'].shape        
         return echo,layer,np.asarray(shape0)     
     
     output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
     shape = output[2]
     data0 = tf.reshape(output[0], shape)
-    data0.set_shape([416,64,config['img_channels']])
+    data0.set_shape([config['img_y'],config['img_x'],config['img_channels']])
     
     data1 = output[1]   
-    data1.set_shape([416,64,30]) #,30   
+    data1.set_shape([config['img_y'],config['img_x'],config['num_classes']]) #,30   
     return data0,data1
 
 train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
@@ -306,22 +351,22 @@ config['embed_dim_flipped'] = train_shape[0][1]
 config['num_patches_flipped'] = train_shape[0][2]
 config['dropout_rate'] = 0.1
 
-num_heads = 20
+num_heads = 10
 dense_dim = 512
 
 transformer_units = [
-    embed_dim * 4,
+    embed_dim * 8,
     embed_dim,
 ]
 
-transformer_layers = 20
+transformer_layers = 30
 
-proj_head_units = [1024, 512, 64] #2048,
-mlp_head_units = [ 512,256,64] 
+proj_head_units = [1024, 512, config['img_x']] #2048,
+mlp_head_units = [256,config['img_x']] 
 #mlp_head_units = [ 2048,1024, 512, 64]  # Size of the dense layers , 2048, 1024,
 
 #input_shape = (416, 64)
-input_shape = (416, 64, config['img_channels'])
+input_shape = (config['img_y'], config['img_x'], config['img_channels'])
 
 
 def mlp(x, hidden_units, dropout_rate):
@@ -434,63 +479,114 @@ custom_loss = FocalLoss(alpha = alpha, gamma =gamma )
 #     transformer_layers,
 #     mlp_head_units,
 # ):
+
     
-inputs = layers.Input(shape=input_shape)
+def transformer_unit(encoded_patches, transformer_layers = transformer_layers):    
+    for _ in range(transformer_layers):
+        
+        encoded_patches = tf.cast(encoded_patches, dtype=tf.float64)
+        
+        # Layer normalization 1.
+        x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
+        # Create a multi-head attention layer.
+        attention_output = layers.MultiHeadAttention(
+            num_heads=num_heads, key_dim=embed_dim, dropout=config['dropout_rate']
+        )(x1, x1)
+        # Skip connection 1.
+        x2 = layers.Add()([attention_output, encoded_patches])
+        # Layer normalization 2.
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        
+        # Skip connection 2.
+        x4 = layers.Add()([x3, x2])
+        
+        # Feed forward
+        mlp_out = mlp(x4,mlp_head_units,dropout_rate=0.2)
+        x5 = layers.Add()([mlp_out, x4])
+        
+        encoded_patches = layers.LayerNormalization(epsilon=1e-6)(x5)
+        
+        encoded_patches = tf.cast(encoded_patches, dtype=tf.float64)
+        
+        return encoded_patches
+
+
+# representation = layers.Conv2D(config['num_classes']*5, (7,5), activation=tf.nn.gelu, padding="same")(input)
+# representation = layers.Conv2D(config['num_classes']*5, 3, activation='relu', padding="same")(representation)
+# representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
+# layers.Dropout(config['dropout_rate'])(representation)
+# output = layers.Conv2D(config['num_classes'], (1,1), padding="same", dtype = tf.float64, activation="softmax")(representation) # dtype = tf.float32,activity_regularizer='l2', activity_regularizer='l2', activation="softmax"
+
+    
+
+
+
+ # ======================= MODEL ============================    
+inputs = layers.Input(shape=input_shape, dtype=tf.float64)
 
 # Project inputs
 dense_proj = tf.keras.Sequential()
 for (idx,units) in enumerate(proj_head_units):
-    dense_proj.add(layers.Dense(units, activation=tf.nn.gelu if idx == 0 else None) )
-    dense_proj.add(layers.Dropout(config['dropout_rate']))
+    dense_proj.add(layers.Dense(units, dtype= tf.float64, activation=tf.nn.gelu if idx == 0 else None) )
+    dense_proj.add(layers.Dropout(config['dropout_rate'], dtype= tf.float64))
     
 
 # Encode patches
 x = tf.reduce_mean(inputs,axis = -1)
 
-encoded_patches = PatchEncoder(num_patches, embed_dim)(x)
+encoded_patches_direct = PatchEncoder(num_patches, embed_dim)(x)
 encoded_patches_flipped = FlippedPatchEncoder( config['num_patches_flipped'], config['embed_dim_flipped'])(x) # this is flipped on purpose
 
-encoded_final = encoded_patches + encoded_patches_flipped
+encoded_patches_direct = tf.cast(encoded_patches_direct, dtype=tf.float64)
+encoded_patches_flipped = tf.cast(encoded_patches_flipped, dtype=tf.float64)
 
-encoded_patches = dense_proj(encoded_final) + encoded_final
+encoded_sum = encoded_patches_direct + encoded_patches_flipped
 
-# Create multiple layers of the Transformer block.
-for _ in range(transformer_layers):
-    # Layer normalization 1.
-    x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    # Create a multi-head attention layer.
-    attention_output = layers.MultiHeadAttention(
-        num_heads=num_heads, key_dim=embed_dim, dropout=config['dropout_rate']
-    )(x1, x1)
-    # Skip connection 1.
-    x2 = layers.Add()([attention_output, encoded_patches])
-    # Layer normalization 2.
-    x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+
+encoded_both = dense_proj(encoded_sum) + encoded_sum + x
+encoded_patches_direct = dense_proj(encoded_patches_direct) + encoded_patches_direct + x
+encoded_patches_flipped = dense_proj(encoded_patches_flipped) + encoded_patches_flipped + x
+
+
+# Create multiple Transformer blocks.
+trans_patches_direct = transformer_unit(encoded_patches_direct)
+
+trans_patches_flipped = transformer_unit(encoded_patches_direct)
+
+trans_patches_both = transformer_unit(encoded_both)
     
-    # Skip connection 2.
-    encoded_patches = layers.Add()([x3, x2])
-    
-    # # MLP (Newly Added: Might delete)
-    # mlp_out = mlp(encoded_patches,mlp_head_units,dropout_rate = config['dropout_rate'])    
-    # # Skip connection 2.
-    # encoded_patches = layers.Add()([x3, mlp_out])
-    # # # MLP (Newly Added: Might delete)
+
 
 # Project Transformer output     
-representation = dense_proj(encoded_patches)
-representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
+representation_direct = dense_proj(trans_patches_direct) + trans_patches_direct # + encoded_patches_direct
+representation_direct = layers.LayerNormalization(epsilon=1e-6)(representation_direct)
+representation_direct= tf.expand_dims(representation_direct, axis=-1) 
 
-representation= tf.expand_dims(representation, axis=-1)  
+representation_flipped = dense_proj(trans_patches_flipped) + trans_patches_flipped + encoded_patches_flipped
+representation_flipped = layers.LayerNormalization(epsilon=1e-6)(representation_flipped) 
+representation_flipped = tf.expand_dims(representation_flipped, axis=-1) 
 
-representation = layers.Conv2D(config['num_classes']*5, (7,5), activation=tf.nn.gelu, padding="same")(representation)
-representation = layers.Conv2D(config['num_classes']*5, 3, activation='relu', padding="same")(representation)
-#representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
-layers.Dropout(config['dropout_rate'])(representation)
-output = layers.Conv2D(config['num_classes'], (1,1), padding="same", dtype = tf.float64, activation="softmax")(representation) # dtype = tf.float32,activity_regularizer='l2', activity_regularizer='l2', activation="softmax"
- 
+representation_both = dense_proj(trans_patches_both) + trans_patches_both
+representation_both = layers.LayerNormalization(epsilon=1e-6)(representation_both) 
+representation_both = tf.expand_dims(representation_both, axis=-1)
+
+
+# Create output convolution 
+output_convolution = tf.keras.Sequential()
+output_convolution.add(layers.Conv2D(config['num_classes']*5, (17,15), activation=tf.nn.gelu, padding="same") )
+output_convolution.add( layers.Conv2D(config['num_classes']*5, (7,5), activation= tf.nn.gelu, padding="same") )
+output_convolution.add( layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", ) )
+output_convolution.add( layers.Dropout(config['dropout_rate']) )
+output_convolution.add( layers.Conv2D(config['num_classes'], (1,1), padding="same", dtype = tf.float64, activation="sigmoid") )
+
+
+# Create the 3 outputs
+representation_direct_output = output_convolution(representation_direct)
+representation_flipped_output = output_convolution(representation_flipped)
+representation_both_output = output_convolution(representation_both) 
 
 # return Keras model.
-model = keras.Model(inputs=inputs, outputs=output)
+model = keras.Model(inputs=inputs, outputs=[representation_direct_output,representation_flipped_output,representation_both_output])
 
 #model =  create_vit_object_detector(input_shape,num_patches,embed_dim,num_heads,transformer_units,transformer_layers,mlp_head_units,)
 
@@ -504,17 +600,17 @@ print(f' Start time {config["start_time"]}')
 
 logz= f"{config['base_path']}/echo_vit/{config['start_time']}_logs/"
 callbacks = [
-   ModelCheckpoint(f"{config['base_path']}//echo_vit_combo//echo_vit_combo_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.000005, verbose= 1),
+   ModelCheckpoint(f"{config['base_path']}//echo_vit_combo_new_large//echo_vit_combo_new_large_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=15, min_lr=0.000005, verbose= 1),
     EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
     TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
-    #WandbCallback()
+    WandbCallback()
 ]
 
-loss = tf.keras.losses.CategoricalCrossentropy()  #tf.keras.losses.CategoricalCrossentropy(), SparseCategoricalFocalLoss(gamma = 3, from_logits = True), tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+#loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing = 0.2)  #tf.keras.losses.CategoricalCrossentropy(), SparseCategoricalFocalLoss(gamma = 3, from_logits = True), tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 model.compile(optimizer=opt,
-          loss= loss, #tf.keras.losses.CategoricalCrossentropy(), #custom_loss, dice_coef_loss tf.keras.losses.CategoricalCrossentropy()
-          metrics=['accuracy']) #,tf.keras.metrics.MeanIoU(num_classes, name="MeanIoU")
+          loss= 'binary_crossentropy',loss_weights =[0.3,0.3,0.4], #tf.keras.losses.CategoricalCrossentropy(), #custom_loss, dice_coef_loss tf.keras.losses.CategoricalCrossentropy()
+          metrics=['accuracy',sm.metrics.iou_score]) #,tf.keras.metrics.MeanIoU(num_classes, name="MeanIoU")
 
 history = model.fit(train_ds, epochs = config['epochs'],validation_data = val_ds, callbacks = callbacks)
 
@@ -524,24 +620,24 @@ print(f' Completion time {config["start_time"]}')
 
 
 if type(loss) is not keras.losses.CategoricalCrossentropy:
-    loaded_model = tf.keras.models.load_model(f"{config['base_path']}//echo_vit//echo_vit_Checkpoint{time_stamp}.h5",
-                                   custom_objects={"PatchEncoder":PatchEncoder,"FocalLoss":FocalLoss})
+    loaded_model = tf.keras.models.load_model(f"{config['base_path']}//echo_vit_combo_new_large//echo_vit_combo_new_large_Checkpoint{time_stamp}.h5",
+                                   custom_objects={"PatchEncoder":PatchEncoder,"FlippedPatchEncoder":FlippedPatchEncoder,"FocalLoss":FocalLoss,"iou_score":sm.metrics.iou_score} )
 else:
-    loaded_model = tf.keras.models.load_model(f"{config['base_path']}//echo_vit//echo_vit_Checkpoint{time_stamp}.h5",
+    loaded_model = tf.keras.models.load_model(f"{config['base_path']}//echo_vit_combo_new_large//echo_vit_combo_new_large_Checkpoint{time_stamp}.h5",
                                        custom_objects={"PatchEncoder":PatchEncoder})
         
 
 # Save model with proper name
 _,acc = model.evaluate(test_ds)
-model.save(f"{config['base_path']}//echo_vit_combo//echo_vit_combo{acc:.2f}_{time_stamp}.h5")
+model.save(f"{config['base_path']}//echo_vit_combo_new_large_new//echo_vit_combo_new_large_new{acc:.2f}_{time_stamp}.h5")
 
 # Custom colormap
 custom_cm = cm.BuPu(np.linspace(0,1,30))
 custom_cm = colors.ListedColormap(custom_cm[10:,:-1])
 
 ## Visualize result of model prediction for "unseen" echogram during training
-model_val_data_path = os.path.join(base_path,'short_eval_data\*.mat')
-#model_val_data_path = os.path.join(base_path,'new_test\image\*.mat')
+# model_val_data_path = os.path.join(base_path,'short_eval_data\*.mat')
+model_val_data_path = os.path.join(base_path,'new_test\image\*.mat')
 model_val_data = glob.glob(model_val_data_path)
 
 batch_idx = random.randint(1,len(model_val_data)) # Pick any of the default batch
@@ -558,7 +654,10 @@ for idx in range(10):
   # a0 = a[idx]
   # a_gt0 = a_gt[idx]
   # ( a0.shape, a_gt0.shape )
-
+  
+  res_list = res0
+  
+  res0 = res0[-1]
   
   res0 = res0.squeeze()
   res0_final = np.argmax(res0,axis=2)

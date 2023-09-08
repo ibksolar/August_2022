@@ -20,9 +20,9 @@ import os
 import random
 from scipy.io import loadmat
 from scipy.ndimage import median_filter as sc_med_filt
-# from focal_loss import SparseCategoricalFocalLoss
-# from keras.metrics import MeanIoU
-# from sklearn.metrics import roc_auc_score
+
+from keras.metrics import MeanIoU
+from sklearn.metrics import roc_auc_score
 
 import glob
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint,TensorBoard,ReduceLROnPlateau
@@ -50,89 +50,52 @@ if gpus:
     print(e)  
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
-time_stamp = '11th_April_2023_1402' #datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
+model_name = 'SimpleFCNet_NewDecimated_Apr23'
+
+time_stamp = '22_April_23_2039' #datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 use_wandb = True
 if use_wandb:    
     ## WandB config
     import wandb
     from wandb.keras import WandbCallback    
     
-    wandb.init( project="my-test-project", entity="ibksolar", name= 'SimpleFCN'+time_stamp,config ={})
+    wandb.init( project="my-test-project", entity="ibksolar", name= model_name + time_stamp,config ={})
     config = wandb.config
-
-
 
 
 # PATHS
 # Path to data
-base_path = r'U:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+# base_path = r'U:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+
+base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\SR_Dataset_v1\Dec'
 train_path = os.path.join(base_path,'train_data\*.mat')
-train_aug_path = os.path.join(base_path,'augmented_plus_train_data\*.mat')
+# train_aug_path = os.path.join(base_path,'augmented_plus_train_data\*.mat')
 val_path = os.path.join(base_path,'val_data\*.mat')
 test_path = os.path.join(base_path,'test_data\*.mat')   
 
 # Create tf.data.Dataset
-config['batch_size'] = 4
+config['batch_size'] = 32
 config['num_classes'] = 1
 
 
+
+
 # Training params
-config['img_y'] = 416*4
+config['img_y'] = 416 # Decimated in fast time
 config['img_x'] = 64*4
 
 config['img_channels'] = 3
 config['weight_decay'] = 0.0001
 
 config['num_classes'] = 1 #30
-config['epochs'] = 150
+config['epochs'] = 20
 config['learning_rate'] = 1e-3
 config['base_path'] = base_path
 SEED = 42
 AUTO = tf.data.experimental.AUTOTUNE
 
 
-# =============================================================================
-# Function for training data
-def read_mat_train(filepath):
-    def _read_mat(filepath):
-        
-        filepath = bytes.decode(filepath.numpy())      
-        mat_file = loadmat(filepath)
-        echo = tf.cast(mat_file['echo_tmp'], dtype=tf.float64)
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)
-        
-        # Data Augmentation
-        
-        if tf.random.uniform(())> 0.5:
-            aug_type = tf.random.uniform((1,1),minval=1, maxval=4,dtype=tf.int64).numpy()
-            
-            if aug_type == 1:
-                echo = tf.experimental.numpy.fliplr(echo)
-                layer = tf.experimental.numpy.fliplr(layer)
-            
-            elif aug_type == 2: # Constant offset
-                echo = echo - 0.3
-            
-            elif aug_type == 3: # Random noise
-                echo = echo - tf.random.normal(shape=(416,64),stddev=0.5,dtype=tf.float64)
-                
-            else: #aug_type == 4:
-                echo = tf.experimental.numpy.flipud(echo)
-                layer = tf.experimental.numpy.flipud(layer)                            
-                   
-        
-        # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
-        shape0 = mat_file['echo_tmp'].shape
-        
-        return echo,layer,np.asarray(shape0)
-    output = tf.py_function(_read_mat,[filepath],[tf.double,tf.double, tf.int64])
-    shape = output[2]
-    data0 = tf.reshape(output[0], shape)
-    data0.set_shape([416,64])
-    
-    data1 = output[1]   
-    data1.set_shape([416,64])   #,30 
-    return data0,data1
+
 
 # =============================================================================
 ## Function for test and validation dataset    
@@ -141,14 +104,14 @@ def read_mat(filepath):
         
         filepath = bytes.decode(filepath.numpy())      
         mat_file = loadmat(filepath)
-        echo = tf.cast(mat_file['echo_tmp'], dtype=tf.float64)
+        echo = tf.cast(mat_file['echo_tmp']) #, dtype=tf.float64
         
         echo = tf.expand_dims(echo, axis=-1)        
         if config['img_channels'] > 1:
             echo = tf.image.grayscale_to_rgb(echo)
         
         # layer = tf.cast(mat_file['raster'], dtype=tf.float64)      
-        layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float64)
+        layer = tf.cast(mat_file['new_raster'])
         
         layer = tf.expand_dims(layer, axis=-1)
         # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
@@ -164,7 +127,7 @@ def read_mat(filepath):
     data1.set_shape([config['img_y'],config['img_x'],1]) #,30   
     return data0,data1
 
-train_ds = tf.data.Dataset.list_files(train_aug_path,shuffle=True) #'*.mat'
+train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
 train_ds = train_ds.map(read_mat,num_parallel_calls=8)
 train_ds = train_ds.batch(config['batch_size'],drop_remainder=True).prefetch(AUTO) #.shuffle(buffer_size = 100 * config['batch_size'])
 
@@ -187,35 +150,39 @@ print(f' Training target shape {train_shape[1]}')
 # Custom Loss
 newFocalLoss = sm.losses.BinaryFocalLoss() #SparseCategoricalFocalLoss(gamma=2, from_logits= True)
 
-input_shape = (config['img_y'], config['img_x'],config['img_channels'])
-#Build the model        
-inputs = tf.keras.layers.Input(shape = input_shape)
-#s = tf.keras.layers.Lambda(lambda x: x / 255)(inputs)
 
+#Build the model 
+input_shape = (config['img_y'], config['img_x'], config['img_channels'])
+ResNet_50_model = sm.Unet(backbone_name='resnet50', encoder_weights='imagenet', encoder_freeze=True, input_shape = input_shape)    
+inputs = keras.Input(shape=input_shape ) #(28,28,1)
+in1 = layers.Conv2D(3, (3, 3), activation='relu', padding='same' )(inputs)       
+in2 = ResNet_50_model(in1)
+
+#s = tf.keras.layers.Lambda(lambda x: x / 255)(inputs)
 #inputs = tf.expand_dims(inputs, axis=-1)
 
 #Contraction path
-c1 = tf.keras.layers.Conv2D(16, (17, 13), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
+c1 = tf.keras.layers.Conv2D(16, (17, 13), activation='relu', kernel_initializer='he_normal', padding='same')(in2)
 c1 = tf.keras.layers.Dropout(0.1)(c1)
 c1 = tf.keras.layers.BatchNormalization()(c1)  
 c1 = tf.keras.layers.Activation('relu')(c1)
 
-c1 = tf.keras.layers.Conv2D(16, (17, 13), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
+c1 = tf.keras.layers.Conv2D(32, (17, 13), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
 c1 = tf.keras.layers.Dropout(0.1)(c1)
 c1 = tf.keras.layers.BatchNormalization()(c1)
 c1 = tf.keras.layers.Activation('relu')(c1)
 
-c1 = tf.keras.layers.Conv2D(16, (7, 5), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
+c1 = tf.keras.layers.Conv2D(32, (7, 5), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
 c1 = tf.keras.layers.Dropout(0.1)(c1)
 c1 = tf.keras.layers.BatchNormalization()(c1)
 c1 = tf.keras.layers.Activation('relu')(c1)
 
-c1 = tf.keras.layers.Conv2D(16, (7, 5), activation='relu', kernel_initializer='he_normal', padding='same')(inputs)
+c1 = tf.keras.layers.Conv2D(64, (7, 5), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
 c1 = tf.keras.layers.Dropout(0.1)(c1)
 c1 = tf.keras.layers.BatchNormalization()(c1)
 c1 = tf.keras.layers.Activation('relu')(c1)
 
-c1 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
+c1 = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c1)
 p1 = tf.keras.layers.MaxPooling2D((2, 2))(c1)
 
 c2 = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(p1)
@@ -268,16 +235,16 @@ c7 = tf.keras.layers.Activation('relu')(c7)
 
 c7 = tf.keras.layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c7)
  
-u8 = tf.keras.layers.Conv2DTranspose(32, (2, 2), strides=(2, 2), padding='same')(c7)
+u8 = tf.keras.layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c7)
 # u8 = tf.keras.layers.concatenate([u8, c2])
-c8 = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u8)
+c8 = tf.keras.layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u8)
 c8 = tf.keras.layers.Dropout(0.1)(c8)
 c8 = tf.keras.layers.BatchNormalization()(c8)
 c8 = tf.keras.layers.Activation('relu')(c8)
 
-c8 = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c8)
+c8 = tf.keras.layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c8)
  
-u9 = tf.keras.layers.Conv2DTranspose(16, (2, 2), strides=(2, 2), padding='same')(c8)
+u9 = tf.keras.layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c8)
 # u9 = tf.keras.layers.concatenate([u9, c1], axis=3)
 c9 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(u9)
 c9 = tf.keras.layers.Dropout(0.1)(c9)
@@ -286,29 +253,28 @@ c9 = tf.keras.layers.Activation('relu')(c9)
 
 c9 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(c9)
  
-outputs = tf.keras.layers.Conv2D(config['num_classes'], (1, 1), padding="same", dtype= tf.float32 )(c9) #sigmoid , activation='softmax'
+outputs = tf.keras.layers.Conv2D(config['num_classes'], (1, 1), padding="same", dtype= tf.float32, activation='sigmoid' )(c9) #sigmoid , activation='softmax'
 
 model = tf.keras.Model(inputs,outputs)
-opt = keras.optimizers.Adam(learning_rate=config['learning_rate'])
-model.compile(optimizer= 'Adam', loss= newFocalLoss, metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
+opt = tfa.optimizers.AdamW(learning_rate=config['learning_rate'], weight_decay = config['weight_decay'])
+model.compile(optimizer= opt, loss= 'binary_crossentropy', metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
 
 config['base_path'] = base_path
 config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
-logz= f"{config['base_path']}/SimpleUNet//{config['start_time']}_logs/"
+logz= f"{config['base_path']}/{model_name}//{config['start_time']}_logs/" #f"{config['base_path']}/SimpleUNet//{config['start_time']}_logs/"
 callbacks = [
-   ModelCheckpoint(f"{config['base_path']}//SimpleFCNet//SimpleFCNet_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.000005, verbose= 1),
+   ModelCheckpoint(f"{config['base_path']}//{model_name}//{model_name}_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
+    ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=10, min_lr=0.000005, verbose= 1),
     EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
-    TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
+    # TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
     WandbCallback()
 ]
 
 
-
-model.fit(train_ds, epochs=config['epochs'], validation_data=test_ds, callbacks=callbacks)
+model.fit(train_ds, epochs=config['epochs'], validation_data=val_ds, callbacks=callbacks)
 
 _,acc = model.evaluate(test_ds)
-model.save(f"{config['base_path']}//SimpleFCNet//SimpleFCNet{acc:.2f}_{time_stamp}.h5")
+model.save(f"{config['base_path']}//{model_name}//{model_name}_{acc:.2f}_{time_stamp}.h5")
 
 # Custom colormap
 custom_cm = cm.Blues(np.linspace(0,1,30))

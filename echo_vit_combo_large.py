@@ -43,7 +43,7 @@ if gpus:
   except RuntimeError as e:
     # Memory growth must be set before GPUs have been initialized
     print(e)  
-tf.keras.mixed_precision.set_global_policy('mixed_float16')
+#tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
 
 use_wandb = True
@@ -60,13 +60,13 @@ else:
     config ={}
 
 
-try:
-    fname = ipynbname.name()
-except:
-    fname = os.path.splitext( os.path.basename(__file__) )[0]
-finally:
-    print ('Could not automatically find file path')
-    fname = 'blank'
+# try:
+#     fname = ipynbname.name()
+# except:
+#     fname = os.path.splitext( os.path.basename(__file__) )[0]
+# finally:
+#     print ('Could not automatically find file path')
+#     fname = 'blank'
 
 
 
@@ -78,7 +78,7 @@ val_path = os.path.join(base_path,'val_data\*.mat')
 test_path = os.path.join(base_path,'test_data\*.mat')   
 
 # Create tf.data.Dataset
-config['Run_Note'] = 'Trying combined fast time and slow time embed_large'
+config['Run_Note'] = 'Trying combined fast time and slow time embed_large: Added combined embed result to transformer output'
 config['batch_size'] = 4
 
 # Training params
@@ -309,10 +309,10 @@ config['num_patches'] = num_patches = train_shape[0][1] #64
 
 config['embed_dim_flipped'] = train_shape[0][1]
 config['num_patches_flipped'] = train_shape[0][2]
-config['dropout_rate'] = 0.1
+config['dropout_rate'] = 0.4
 
-num_heads = 10
-dense_dim = 512
+num_heads = 12
+#dense_dim = 512
 
 transformer_units = [
     embed_dim * 4,
@@ -442,87 +442,87 @@ custom_loss = FocalLoss(alpha = alpha, gamma =gamma )
 
 
 # # Use Both GPUs
-# strategy = tf.distribute.MirroredStrategy( cross_device_ops=tf.distribute.HierarchicalCopyAllReduce() )
-# print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
-# with strategy.scope():
+strategy = tf.distribute.MirroredStrategy( cross_device_ops=tf.distribute.HierarchicalCopyAllReduce() )
+print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+with strategy.scope():
 
-inputs = layers.Input(shape=input_shape, dtype=tf.float64)
-
-# Project inputs
-dense_proj = tf.keras.Sequential()
-for (idx,units) in enumerate(proj_head_units):
-    dense_proj.add(layers.Dense(units, activation=tf.nn.gelu if idx == 0 else None) )
-    dense_proj.add(layers.Dropout(config['dropout_rate']))
+    inputs = layers.Input(shape=input_shape,) # dtype=tf.float64
     
-
-# Encode patches
-x = tf.reduce_mean(inputs,axis = -1)
-
-encoded_patches = PatchEncoder(num_patches, embed_dim)(x)
-encoded_patches_flipped = FlippedPatchEncoder( config['num_patches_flipped'], config['embed_dim_flipped'])(x) # this is flipped on purpose
-
-encoded_final = encoded_patches + encoded_patches_flipped
-
-encoded_patches = dense_proj(encoded_final) + encoded_final
-
-# Create multiple layers of the Transformer block.
-for _ in range(transformer_layers):
-    # Layer normalization 1.
-    x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    # Create a multi-head attention layer.
-    attention_output = layers.MultiHeadAttention(
-        num_heads=num_heads, key_dim=embed_dim, dropout=config['dropout_rate']
-    )(x1, x1)
-    # Skip connection 1.
-    x2 = layers.Add()([attention_output, encoded_patches])
-    # Layer normalization 2.
-    x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+    # Project inputs
+    dense_proj = tf.keras.Sequential()
+    for (idx,units) in enumerate(proj_head_units):
+        dense_proj.add(layers.Dense(units, activation=tf.nn.gelu if idx == 0 else None) )
+        dense_proj.add(layers.Dropout(config['dropout_rate']))
+        
     
-    # Skip connection 2.
-    encoded_patches = layers.Add()([x3, x2])
+    # Encode patches
+    x = tf.reduce_mean(inputs,axis = -1)
     
-    # # MLP (Newly Added: Might delete)
-    # mlp_out = mlp(encoded_patches,mlp_head_units,dropout_rate = config['dropout_rate'])    
-    # # Skip connection 2.
-    # encoded_patches = layers.Add()([x3, mlp_out])
-    # # # MLP (Newly Added: Might delete)
-
-# Project Transformer output     
-representation = dense_proj(encoded_patches)
-representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-
-representation= tf.expand_dims(representation, axis=-1)  
-
-representation = layers.Conv2D(config['num_classes']*5, (17,15), activation='relu', padding="same")(representation)
-representation = layers.Conv2D(config['num_classes']*5, (7,7), activation='relu', padding="same")(representation)
-representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
-layers.Dropout(config['dropout_rate'])(representation)
-output = layers.Conv2D(config['num_classes'], (1,1), padding="same", dtype = tf.float64,activation="softmax")(representation) # activation="softmax" dtype = tf.float32,activity_regularizer='l2', activity_regularizer='l2', activation="softmax"
-   
-model = keras.Model(inputs=inputs, outputs=output)
-
-#model =  create_vit_object_detector(input_shape,num_patches,embed_dim,num_heads,transformer_units,transformer_layers,mlp_head_units,)   
-opt = tf.keras.optimizers.Adam(learning_rate=config['learning_rate'], clipnorm=0.5, clipvalue= 3) #, clipnorm=0.5
-opt2 = tfa.optimizers.AdamW(weight_decay = 0.001, learning_rate=config['learning_rate'])
-
-## Print Start time
-config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
-print(f' Start time {config["start_time"]}')
-
-
-logz= f"{config['base_path']}/echo_vit_combo_large/{config['start_time']}_logs/"
-callbacks = [
-   ModelCheckpoint(f"{config['base_path']}//echo_vit_combo_large//echo_vit_combo_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
-    ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.00005, verbose= 1),
-    EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
-    TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
-    WandbCallback()
-]
-
-loss = tf.keras.losses.SparseCategoricalCrossentropy() #tf.keras.losses.CategoricalCrossentropy(label_smoothing = 0.1)  #  tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), tf.keras.losses.CategoricalCrossentropy(label_smoothing = 0.1), SparseCategoricalFocalLoss(gamma = 3, from_logits = True), tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-model.compile(optimizer=opt2,
-          loss= loss, #tf.keras.losses.CategoricalCrossentropy(), #custom_loss, dice_coef_loss tf.keras.losses.CategoricalCrossentropy()
-          metrics=['accuracy', sm.metrics.iou_score,]) #,tf.keras.metrics.MeanIoU(num_classes, name="MeanIoU")
+    encoded_patches = PatchEncoder(num_patches, embed_dim)(x)
+    encoded_patches_flipped = FlippedPatchEncoder( config['num_patches_flipped'], config['embed_dim_flipped'])(x) # this is flipped on purpose
+    
+    encoded_final = encoded_patches + encoded_patches_flipped
+    
+    encoded_patches = dense_proj(encoded_final) + encoded_final # Skip connection
+    
+    # Create multiple layers of the Transformer block.
+    for _ in range(transformer_layers):
+        # Layer normalization 1.
+        x1 = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
+        # Create a multi-head attention layer.
+        attention_output = layers.MultiHeadAttention(
+            num_heads=num_heads, key_dim=embed_dim, dropout=config['dropout_rate']
+        )(x1, x1)
+        # Skip connection 1.
+        x2 = layers.Add()([attention_output, encoded_patches])
+        # Layer normalization 2.
+        x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
+        
+        # Skip connection 2.
+        encoded_patches = layers.Add()([x3, x2])
+        
+        # # MLP (Newly Added: Might delete)
+        # mlp_out = mlp(encoded_patches,mlp_head_units,dropout_rate = config['dropout_rate'])    
+        # # Skip connection 2.
+        # encoded_patches = layers.Add()([x3, mlp_out])
+        # # # MLP (Newly Added: Might delete)
+    
+    # Project Transformer output     
+    representation = dense_proj(encoded_patches) + encoded_patches
+    representation = layers.LayerNormalization(epsilon=1e-6)(representation)
+    
+    representation= tf.expand_dims(representation, axis=-1)  
+    
+    representation = layers.Conv2D(config['num_classes']*5, (config['img_y'],15), activation='relu', padding="same")(representation)
+    representation = layers.Conv2D(config['num_classes']*5, (config['img_y'],7), activation='relu', padding="same")(representation)
+    representation = layers.Conv2D(config['num_classes'], 3, activation="relu", padding="same", )(representation)   # activity_regularizer='l2', kernel_regularizer=tf.keras.regularizers.L1L2(l1=1e-5, l2=1e-4), 
+    layers.Dropout(config['dropout_rate'])(representation)
+    output = layers.Conv2D(config['num_classes'], (1,1), padding="same", activation="softmax")(representation) # activation="softmax" dtype = tf.float32,activity_regularizer='l2', activity_regularizer='l2', activation="softmax"
+       
+    model = keras.Model(inputs=inputs, outputs=output)
+    
+    #model =  create_vit_object_detector(input_shape,num_patches,embed_dim,num_heads,transformer_units,transformer_layers,mlp_head_units,)   
+    opt = tf.keras.optimizers.Adam(learning_rate=config['learning_rate']) #, clipnorm=0.5,  clipnorm=0.5, clipvalue= 3
+    opt2 = tfa.optimizers.AdamW(weight_decay = 0.001, learning_rate=config['learning_rate'])
+    
+    ## Print Start time
+    config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
+    print(f' Start time {config["start_time"]}')
+    
+    
+    logz= f"{config['base_path']}/echo_vit_combo_large/{config['start_time']}_logs/"
+    callbacks = [
+       ModelCheckpoint(f"{config['base_path']}//echo_vit_combo_large//echo_vit_combo_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
+        ReduceLROnPlateau(monitor="val_loss", factor=0.25, patience=10, min_lr=0.00005, verbose= 1),
+        EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
+        TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
+        WandbCallback()
+    ]
+    
+    loss = tf.keras.losses.SparseCategoricalCrossentropy() #tf.keras.losses.CategoricalCrossentropy(label_smoothing = 0.1)  #  tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), tf.keras.losses.CategoricalCrossentropy(label_smoothing = 0.1), SparseCategoricalFocalLoss(gamma = 3, from_logits = True), tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    model.compile(optimizer=opt2,
+              loss= loss, #tf.keras.losses.CategoricalCrossentropy(), #custom_loss, dice_coef_loss tf.keras.losses.CategoricalCrossentropy()
+              metrics=['accuracy', sm.metrics.iou_score,]) #,tf.keras.metrics.MeanIoU(num_classes, name="MeanIoU")
 
 
 history = model.fit(train_ds, epochs = config['epochs'],validation_data = val_ds, callbacks = callbacks)
@@ -542,7 +542,7 @@ else:
 
 # Save model with proper name
 model = loaded_model # Loaded best model from training checkpoint
-_,acc = model.evaluate(test_ds)
+_,acc,_ = model.evaluate(test_ds)
 model.save(f"{config['base_path']}//echo_vit_combo_large//echo_vit_combo{acc:.2f}_{time_stamp}.h5")
 
 # Custom colormap

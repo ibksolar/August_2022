@@ -20,7 +20,7 @@ import os
 import random
 from scipy.io import loadmat
 from scipy.ndimage import median_filter as sc_med_filt
-# from focal_loss import SparseCategoricalFocalLoss
+
 # from keras.metrics import MeanIoU
 # from sklearn.metrics import roc_auc_score
 
@@ -29,7 +29,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint,TensorBoar
 #import segmentation_models as sm
 from datetime import datetime
 
-
+# from focal_loss import SparseCategoricalFocalLoss
 import segmentation_models as sm
 sm.set_framework('tf.keras')
 sm.framework()
@@ -50,17 +50,17 @@ if gpus:
     print(e)  
 tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
-time_stamp = '11th_April_2023_1402' #datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
+model_name = 'SimpleFCNet_Apr23'
+
+time_stamp = '05_May_23_2039' #datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
 use_wandb = True
 if use_wandb:    
     ## WandB config
     import wandb
     from wandb.keras import WandbCallback    
     
-    wandb.init( project="my-test-project", entity="ibksolar", name= 'SimpleFCN'+time_stamp,config ={})
+    wandb.init( project="my-test-project", entity="ibksolar", name= model_name + time_stamp,config ={})
     config = wandb.config
-
-
 
 
 # PATHS
@@ -72,8 +72,10 @@ val_path = os.path.join(base_path,'val_data\*.mat')
 test_path = os.path.join(base_path,'test_data\*.mat')   
 
 # Create tf.data.Dataset
-config['batch_size'] = 4
+config['batch_size'] = 8
 config['num_classes'] = 1
+
+
 
 
 # Training params
@@ -289,14 +291,14 @@ c9 = tf.keras.layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='h
 outputs = tf.keras.layers.Conv2D(config['num_classes'], (1, 1), padding="same", dtype= tf.float32 )(c9) #sigmoid , activation='softmax'
 
 model = tf.keras.Model(inputs,outputs)
-opt = keras.optimizers.Adam(learning_rate=config['learning_rate'])
-model.compile(optimizer= 'Adam', loss= newFocalLoss, metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
+opt = tfa.optimizers.AdamW(learning_rate=config['learning_rate'], weight_decay = config['weight_decay'])
+model.compile(optimizer= opt, loss= 'binary_crossentropy', metrics=['accuracy']) # sparse_categorical_crossentropy,jaccard_distance,binary_crossentropy,tf.keras.losses.KLDivergence(),
 
 config['base_path'] = base_path
 config['start_time'] = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
-logz= f"{config['base_path']}/SimpleUNet//{config['start_time']}_logs/"
+logz= f"{config['base_path']}/{model_name}//{config['start_time']}_logs/" #f"{config['base_path']}/SimpleUNet//{config['start_time']}_logs/"
 callbacks = [
-   ModelCheckpoint(f"{config['base_path']}//SimpleFCNet//SimpleFCNet_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
+   ModelCheckpoint(f"{config['base_path']}//{model_name}//{model_name}_Checkpoint{time_stamp}.h5", save_best_only=True, monitor="val_loss"),
     ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=10, min_lr=0.000005, verbose= 1),
     EarlyStopping(monitor="val_loss", patience=30, verbose=1), 
     TensorBoard(log_dir = logz,histogram_freq = 1,profile_batch = '1,70', embeddings_freq=50),
@@ -308,7 +310,7 @@ callbacks = [
 model.fit(train_ds, epochs=config['epochs'], validation_data=test_ds, callbacks=callbacks)
 
 _,acc = model.evaluate(test_ds)
-model.save(f"{config['base_path']}//SimpleFCNet//SimpleFCNet{acc:.2f}_{time_stamp}.h5")
+model.save(f"{config['base_path']}//{model_name}//{model_name}_{acc:.2f}_{time_stamp}.h5")
 
 # Custom colormap
 custom_cm = cm.Blues(np.linspace(0,1,30))

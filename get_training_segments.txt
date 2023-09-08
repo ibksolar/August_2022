@@ -1,0 +1,9 @@
+import os
+import glob
+
+
+base_path = r'Y:\ibikunle\Python_Project\Fall_2021\all_block_data\Attention_Train_data\Full_size_data'  # < == FIX HERE e.g os.path.join( os.getcwd(), echo_path ) 'Y:\ibikunle\Python_Project\Fall_2021\all_block_data'
+
+train_path=os.path.join(base_path,r'train_data\*.mat')
+train_data = glob.glob(train_path)
+np.unique( [ os.path.basename(elem)[:11] for elem in train_data] )

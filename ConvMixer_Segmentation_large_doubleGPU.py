@@ -56,7 +56,7 @@ if use_wandb:
     import wandb
     from wandb.keras import WandbCallback    
     
-    wandb.init( project="my-test-project", entity="ibksolar", name='ConvMixer_large'+time_stamp,config ={})
+    wandb.init( project="my-test-project", entity="ibksolar", name='ConvMixer_large_doubleGPU'+time_stamp,config ={})
     config = wandb.config
 else:
     config ={}
@@ -205,7 +205,7 @@ def read_mat_train(filepath):
         if config['img_channels'] > 1:
             echo = tf.image.grayscale_to_rgb(echo)
         
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)
+        layer = tf.cast(mat_file['semantic_seg2'], dtype=tf.float64)
         #layer = tf.cast( tf.cast(mat_file['raster'], dtype=tf.bool), dtype=tf.float64)
         
         # Data Augmentation
@@ -271,7 +271,7 @@ def read_mat(filepath):
         if config['img_channels'] > 1:
             echo = tf.image.grayscale_to_rgb(echo)
         
-        layer = tf.cast(mat_file['semantic_seg'], dtype=tf.float64)      
+        layer = tf.cast(mat_file['semantic_seg2'], dtype=tf.float64)      
         
         layer = tf.expand_dims(layer, axis=-1)
         # layer = tf.keras.utils.to_categorical(layer, config['num_classes'] )
@@ -288,12 +288,12 @@ def read_mat(filepath):
     return data0,data1
 
 train_ds = tf.data.Dataset.list_files(train_path,shuffle=True) #'*.mat'
-train_ds = train_ds.map(read_mat,num_parallel_calls=8)
+train_ds = train_ds.map(read_mat_train,num_parallel_calls=8)
 train_ds = train_ds.batch(config['batch_size'],drop_remainder=True).prefetch(AUTO) #.shuffle(buffer_size = 100 * config['batch_size'])
 
 # No augmentation for testing and validation
 val_ds = tf.data.Dataset.list_files(val_path,shuffle=True)
-val_ds = val_ds.map(read_mat,num_parallel_calls=8)
+val_ds = val_ds.map(read_mat_train,num_parallel_calls=8)
 val_ds = val_ds.batch(config['batch_size'],drop_remainder=True).cache().prefetch(AUTO)
 
 test_ds = tf.data.Dataset.list_files(test_path,shuffle=True)
@@ -348,7 +348,7 @@ def conv_mixer_block(x, filters: int, kernel_size: int):
 
 
 def get_conv_mixer_256_8(
-     filters=64, depth=8, kernel_size=(17,15), patch_size=(1,config['img_y']), num_classes=config['num_classes']): #depth=8, kernel_size=5  patch_size=2,
+     filters=32, depth=15, kernel_size=(17,15), patch_size=(1,config['img_y']), num_classes=config['num_classes']): #depth=8, kernel_size=5  patch_size=2,
     """ConvMixer-256/8: https://openreview.net/pdf?id=TVHS5Y4dNvM.
     The hyperparameter values are taken from the paper.
     """
@@ -368,7 +368,7 @@ def get_conv_mixer_256_8(
     x= layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', strides=(2, 2), padding='same')(x) #,strides=(2, 2)
     x = layers.Conv2D(16, (3, 3), activation='relu', kernel_initializer='he_normal', padding='same')(x)
     x = layers.Dropout(0.4)(x)
-    outputs = layers.Conv2D(config['num_classes'],(1,1), padding = 'same', dtype=tf.float64)(x) #softmax, sigmoid, activation="softmax", 
+    outputs = layers.Conv2D(config['num_classes'],(1,1), padding = 'same',)(x) #softmax, sigmoid, activation="softmax",  dtype=tf.float64
 
     return Model(inputs, outputs)
 
@@ -415,9 +415,12 @@ def run_experiment(model):
 
     return history, model
 
+strategy = tf.distribute.MirroredStrategy( cross_device_ops=tf.distribute.HierarchicalCopyAllReduce() )
+#print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
 
-conv_mixer_model = get_conv_mixer_256_8()
-history, conv_mixer_model = run_experiment(conv_mixer_model)
+with strategy.scope():    
+    conv_mixer_model = get_conv_mixer_256_8()
+    history, conv_mixer_model = run_experiment(conv_mixer_model)
 
 
 time_stamp = datetime.strftime( datetime.now(),'%d_%B_%y_%H%M')
